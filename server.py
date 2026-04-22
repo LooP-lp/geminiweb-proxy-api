@@ -133,9 +133,9 @@ DEFAULT_MODELS = ["gemini-3.0-flash", "gemini-3.0-flash-thinking", "gemini-3.1-p
 
 # 默认模型 ID (用于请求头选择模型)
 DEFAULT_MODEL_IDS = {
-    "flash": "5bf011840784117a",
+    "flash": "fbb127bbb056c959",
     "pro": "9d8ca3786ebdfbea", 
-    "thinking": "e051ce1aa80aa576",
+    "thinking": "5bf011840784117a",
 }
 
 # 配置存储

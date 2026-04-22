@@ -85,7 +85,7 @@ def chat_image_generation():
     
     response = client.chat.completions.create(
         model="gemini-3.1-pro",
-        messages=[{"role": "user", "content": "生成一张可爱的猫耳女仆图片"}]
+        messages=[{"role": "user", "content": "生成一张可爱的紫色猫耳女仆图片"}]
     )
     print(response.choices[0].message.content)
 
