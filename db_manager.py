@@ -138,12 +138,30 @@ class DBManager:
             return None
 
     def list_all_users(self):
-        """列出所有用户"""
+        """列出所有用户及完整信息"""
         try:
             with self.conn.cursor() as cur:
-                cur.execute("SELECT id, username, created_at FROM users ORDER BY id")
+                cur.execute("""
+                    SELECT 
+                        u.id, u.username, u.created_at,
+                        COUNT(DISTINCT k.id) as key_count,
+                        COALESCE(SUM(us.request_count), 0) as total_requests,
+                        COALESCE(SUM(us.total_tokens), 0) as total_tokens
+                    FROM users u
+                    LEFT JOIN api_keys k ON k.user_id = u.id
+                    LEFT JOIN usage_stats us ON us.user_id = u.id
+                    GROUP BY u.id, u.username, u.created_at
+                    ORDER BY u.id
+                """)
                 rows = cur.fetchall()
-                return [{"id": r[0], "username": r[1], "created_at": r[2].isoformat()} for r in rows]
+                return [{
+                    "id": r[0], 
+                    "username": r[1], 
+                    "created_at": r[2].isoformat(),
+                    "key_count": r[3],
+                    "total_requests": r[4],
+                    "total_tokens": r[5]
+                } for r in rows]
         except Exception as e:
             print(f"获取用户列表失败: {e}")
             return []

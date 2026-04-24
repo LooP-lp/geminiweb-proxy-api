@@ -2,9 +2,9 @@ from db_manager import DBManager
 import sys
 
 def list_users():
-    print("=" * 50)
+    print("=" * 80)
     print("  用户列表")
-    print("=" * 50)
+    print("=" * 80)
     print()
     
     try:
@@ -15,16 +15,26 @@ def list_users():
             print("暂无用户数据")
             return
         
-        print(f"{'ID':<6} {'用户名':<20} {'创建时间':<20}")
-        print("-" * 50)
+        print(f"{'ID':<5} {'用户名':<18} {'API Keys':<10} {'请求数':<12} {'Token用量':<15} {'创建时间':<20}")
+        print("-" * 80)
         for u in users:
-            print(f"{u['id']:<6} {u['username']:<20} {u['created_at'][:19]:<20}")
+            tokens = _format_tokens(u['total_tokens'])
+            print(f"{u['id']:<5} {u['username']:<18} {u['key_count']:<10} {u['total_requests']:<12} {tokens:<15} {u['created_at'][:19]:<20}")
         print()
         print(f"共 {len(users)} 个用户")
         
     except Exception as e:
         print(f"❌ 获取用户列表失败: {e}")
         sys.exit(1)
+
+def _format_tokens(n):
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.2f}B"
+    elif n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    elif n >= 1_000:
+        return f"{n/1_000:.2f}K"
+    return str(n)
 
 def delete_user():
     print("=" * 50)
