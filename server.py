@@ -1593,9 +1593,28 @@ def get_admin_html():
     }
     function copyAndCloseKey() {
         var keyText = document.getElementById('created-key-display').textContent;
-        navigator.clipboard.writeText(keyText).then(function() {
-            closeModal('modal-show-key');
-        });
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(keyText).then(function() {
+                closeModal('modal-show-key');
+            }).catch(function() {
+                fallbackCopy(keyText);
+            });
+        } else {
+            fallbackCopy(keyText);
+        }
+    }
+    function fallbackCopy(text) {
+        var textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+        } catch(e) {}
+        document.body.removeChild(textarea);
+        closeModal('modal-show-key');
     }
 
     // ===== API Key Management =====
