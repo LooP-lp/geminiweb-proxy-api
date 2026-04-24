@@ -51,6 +51,13 @@ class DBManager:
                         is_active BOOLEAN DEFAULT TRUE
                     );
                 """)
+                # 迁移旧字段大小
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name='api_keys' AND column_name='api_key'
+                """)
+                if cur.fetchone():
+                    cur.execute("ALTER TABLE api_keys ALTER COLUMN api_key TYPE VARCHAR(52)")
                 # usage_stats 表 (按用户+模型维度聚合)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS usage_stats (
