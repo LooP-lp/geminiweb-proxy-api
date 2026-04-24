@@ -929,9 +929,26 @@ def get_admin_html():
         .token-badge.valid{background:#e6f4ea;color:#137333;}
         .token-badge.invalid{background:#fce8e6;color:#c5221f;}
         .token-badge.loading{background:#fef7e0;color:#b06000;}
-        /* === Animations === */
-        @keyframes fadeIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
-        .tab-content.active{animation:fadeIn .3s ease forwards;}
+        /* === Modal Overlay === */
+        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000;opacity:0;visibility:hidden;transition:opacity .25s,visibility .25s;}
+        .modal-overlay.active{opacity:1;visibility:visible;}
+        .modal-panel{background:var(--surface);border-radius:16px;padding:24px;width:90%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.3);transform:scale(.95) translateY(20px);transition:transform .25s ease;}
+        .modal-overlay.active .modal-panel{transform:scale(1) translateY(0);}
+        .modal-title{font-size:18px;font-weight:600;margin-bottom:16px;color:var(--text);}
+        .modal-body{font-size:14px;color:var(--muted);margin-bottom:20px;}
+        .modal-input{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;font-size:14px;font-family:inherit;background:var(--input-bg);color:var(--text);transition:border-color .2s,box-shadow .2s;}
+        .modal-input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,115,232,.2);}
+        .modal-actions{display:flex;gap:12px;justify-content:flex-end;}
+        .modal-btn{padding:10px 20px;border-radius:20px;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;border:1px solid var(--border);background:var(--surface);color:var(--text);}
+        .modal-btn:hover{border-color:var(--blue);color:var(--blue);}
+        .modal-btn.primary{background:var(--blue);color:#fff;border:none;}
+        .modal-btn.primary:hover{background:#1557b0;}
+        .modal-btn.danger{background:var(--red);color:#fff;border:none;}
+        .modal-btn.danger:hover{background:#c5221f;}
+        .key-display{font-family:'SF Mono',monospace;font-size:14px;background:var(--surface-2);padding:16px;border-radius:12px;color:var(--blue);word-break:break-all;margin:12px 0;}
+        .key-warning{background:#fef7e0;border:1px solid #fdd663;border-radius:12px;padding:12px;font-size:13px;color:#b06000;margin-bottom:12px;}
+        @keyframes shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-5px);}75%{transform:translateX(5px);}}
+        .shake{animation:shake .3s ease;}
         /* === Responsive === */
         @media(max-width:1100px){
             .stats-grid,.stats-grid-2{grid-template-columns:repeat(2,1fr);}
@@ -952,11 +969,43 @@ def get_admin_html():
             .stats-grid,.stats-grid-2{grid-template-columns:1fr;}
             .model-bar .name{width:100px;}
         }
-    </style>
-</head>
-    </style>
+</style>
 </head>
 <body>
+    <!-- Modal: Create API Key -->
+    <div id="modal-create-key" class="modal-overlay">
+        <div class="modal-panel">
+            <div class="modal-title">创建 API Key</div>
+            <div class="modal-body">请输入备注（可选），用于标识此 Key 的用途</div>
+            <input type="text" id="new-key-note" class="modal-input" placeholder="例如: 开发测试" maxlength="200">
+            <div class="modal-actions">
+                <button class="modal-btn" onclick="closeModal('modal-create-key')">取消</button>
+                <button class="modal-btn primary" id="btn-create-key-confirm">创建</button>
+            </div>
+        </div>
+    </div>
+    <!-- Modal: Show Created Key -->
+    <div id="modal-show-key" class="modal-overlay">
+        <div class="modal-panel">
+            <div class="modal-title">API Key 已创建</div>
+            <div class="key-warning">请立即复制并妥善保存，关闭此窗口后将无法再次查看！</div>
+            <div class="key-display" id="created-key-display"></div>
+            <div class="modal-actions">
+                <button class="modal-btn primary" onclick="copyAndCloseKey()">复制并关闭</button>
+            </div>
+        </div>
+    </div>
+    <!-- Modal: Confirm Delete -->
+    <div id="modal-delete-key" class="modal-overlay">
+        <div class="modal-panel">
+            <div class="modal-title">删除确认</div>
+            <div class="modal-body">确定要删除此 API Key 吗？此操作不可恢复。</div>
+            <div class="modal-actions">
+                <button class="modal-btn" onclick="closeModal('modal-delete-key')">取消</button>
+                <button class="modal-btn danger" id="btn-delete-key-confirm">确认删除</button>
+            </div>
+        </div>
+    </div>
     <div class="sidebar">
         <div class="sidebar-logo">&#129302; Gemini API</div>
         <div class="sidebar-nav">
@@ -1527,7 +1576,30 @@ def get_admin_html():
         consoleTimer = setInterval(loadConsoleData, 10000);
     }
 
+    // ===== Modal Functions =====
+    function openModal(id) {
+        var modal = document.getElementById(id);
+        if (modal) {
+            modal.classList.add('active');
+            var input = modal.querySelector('.modal-input');
+            if (input) {
+                setTimeout(function() { input.focus(); }, 100);
+            }
+        }
+    }
+    function closeModal(id) {
+        var modal = document.getElementById(id);
+        if (modal) modal.classList.remove('active');
+    }
+    function copyAndCloseKey() {
+        var keyText = document.getElementById('created-key-display').textContent;
+        navigator.clipboard.writeText(keyText).then(function() {
+            closeModal('modal-show-key');
+        });
+    }
+
     // ===== API Key Management =====
+    var pendingDeleteKeyId = null;
     async function loadApiKeys() {
         try {
             var resp = await fetch('/admin/api-keys', {credentials:'same-origin'});
@@ -1551,7 +1623,7 @@ def get_admin_html():
                     '<span class="key-status ' + statusClass + '">' + statusText + '</span>' +
                     '<div class="key-actions">' +
                     '<button class="key-btn" onclick="toggleApiKey(' + k.id + ')">' + (k.is_active ? '禁用' : '启用') + '</button>' +
-                    '<button class="key-btn delete" onclick="deleteApiKey(' + k.id + ')">删除</button>' +
+                    '<button class="key-btn delete" onclick="confirmDeleteApiKey(' + k.id + ')">删除</button>' +
                     '</div>';
                 container.appendChild(item);
             });
@@ -1559,8 +1631,15 @@ def get_admin_html():
     }
 
     async function showCreateKeyModal() {
-        var note = prompt('请输入备注（可选）:', '');
-        if (note === null) return;
+        document.getElementById('new-key-note').value = '';
+        openModal('modal-create-key');
+    }
+
+    document.getElementById('btn-create-key-confirm').addEventListener('click', async function() {
+        var btn = this;
+        var note = document.getElementById('new-key-note').value;
+        btn.disabled = true;
+        btn.textContent = '创建中...';
         try {
             var resp = await fetch('/admin/api-keys', {
                 method: 'POST',
@@ -1570,14 +1649,29 @@ def get_admin_html():
             });
             var result = await resp.json();
             if (result.success && result.data) {
+                closeModal('modal-create-key');
                 var key = result.data.api_key;
-                var fullKey = prompt('API Key 创建成功！请保存以下 Key: (关闭后无法再次查看)', key);
+                document.getElementById('created-key-display').textContent = key;
+                openModal('modal-show-key');
                 loadApiKeys();
             } else {
-                alert('创建失败: ' + (result.message || '未知错误'));
+                var panel = document.querySelector('#modal-create-key .modal-panel');
+                panel.classList.add('shake');
+                setTimeout(function() { panel.classList.remove('shake'); }, 300);
             }
-        } catch(e) { alert('创建失败: ' + e.message); }
-    }
+        } catch(e) {
+            var panel = document.querySelector('#modal-create-key .modal-panel');
+            panel.classList.add('shake');
+            setTimeout(function() { panel.classList.remove('shake'); }, 300);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '创建';
+        }
+    });
+
+    document.getElementById('new-key-note').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') document.getElementById('btn-create-key-confirm').click();
+    });
 
     async function toggleApiKey(keyId) {
         try {
@@ -1588,26 +1682,41 @@ def get_admin_html():
             var result = await resp.json();
             if (result.success) {
                 loadApiKeys();
-            } else {
-                alert('操作失败: ' + result.message);
             }
-        } catch(e) { alert('操作失败: ' + e.message); }
+        } catch(e) { console.error('Toggle API key error:', e); }
     }
 
-    async function deleteApiKey(keyId) {
-        if (!confirm('确定要删除这个 API Key 吗？此操作不可恢复。')) return;
+    function confirmDeleteApiKey(keyId) {
+        pendingDeleteKeyId = keyId;
+        openModal('modal-delete-key');
+    }
+
+    document.getElementById('btn-delete-key-confirm').addEventListener('click', async function() {
+        if (!pendingDeleteKeyId) return;
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = '删除中...';
         try {
-            var resp = await fetch('/admin/api-keys/' + keyId, {
+            var resp = await fetch('/admin/api-keys/' + pendingDeleteKeyId, {
                 method: 'DELETE',
                 credentials: 'same-origin'
             });
             var result = await resp.json();
             if (result.success) {
+                closeModal('modal-delete-key');
                 loadApiKeys();
-            } else {
-                alert('删除失败: ' + result.message);
             }
-        } catch(e) { alert('删除失败: ' + e.message); }
+        } catch(e) { console.error('Delete API key error:', e); }
+        finally {
+            btn.disabled = false;
+            btn.textContent = '确认删除';
+            pendingDeleteKeyId = null;
+        }
+    });
+
+    // Old delete function - kept for compatibility
+    async function deleteApiKey(keyId) {
+        // Deprecated - use confirmDeleteApiKey instead
     }
 
     // ===== Config =====
