@@ -28,9 +28,6 @@ API_KEY = "sk-geminixxxxx"
 HOST = "0.0.0.0"
 PORT = 7788
 CONFIG_FILE = "config_data.json"
-# 后台登录账号密码
-ADMIN_USERNAME = "yijie"
-ADMIN_PASSWORD = "LiaoPeng6"
 # Token 自动刷新配置
 TOKEN_REFRESH_INTERVAL_MIN = 200  # 刷新间隔最小秒数
 TOKEN_REFRESH_INTERVAL_MAX = 300  # 刷新间隔最大秒数
@@ -42,6 +39,10 @@ MEDIA_BASE_URL = "http://127.0.0.1:7788"
 
 import random
 from datetime import datetime
+
+# 初始化数据库连接
+from db_manager import DBManager
+db = DBManager()
 
 # 后台刷新任务控制 (asyncio 版本，已弃用)
 _background_refresh_task = None
@@ -116,6 +117,16 @@ def cleanup_old_media(max_age_hours: int = 1):
 
 # 存储有效的 session token
 _admin_sessions = set()
+
+# 管理后台统计数据
+_stats = {
+    "total_requests": 0,
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "total_tokens": 0,
+    "requests_by_model": {},
+    "start_time": time.time(),
+}
 
 def generate_session_token():
     """生成随机 session token"""
@@ -740,6 +751,7 @@ def get_login_html():
                 submitBtn.textContent = '登 录';
             }
         });
+        window.sendMessage = sendMessage;
     </script>
 </body>
 </html>'''
@@ -751,409 +763,900 @@ def get_admin_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini API 配置</title>
+    <title>Gemini API Admin</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        .card { background: white; border-radius: 16px; padding: 30px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); position: relative; }
-        .token-status { position: absolute; top: 15px; left: 20px; font-size: 12px; padding: 6px 12px; border-radius: 20px; font-weight: 500; }
-        .token-status.valid { background: #d4edda; color: #155724; }
-        .token-status.invalid { background: #f8d7da; color: #721c24; }
-        .token-status.loading { background: #fff3cd; color: #856404; }
-        h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
-        .subtitle { color: #666; margin-bottom: 30px; font-size: 14px; }
-        .section { margin-bottom: 25px; }
-        .section-title { font-size: 16px; font-weight: 600; color: #333; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #eee; }
-        .required { color: #e74c3c; }
-        .optional { color: #95a5a6; font-size: 12px; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; font-size: 13px; font-weight: 500; color: #555; margin-bottom: 5px; }
-        input, textarea { width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; font-family: monospace; transition: border-color 0.2s; }
-        input:focus, textarea:focus { outline: none; border-color: #667eea; }
-        textarea { resize: vertical; min-height: 80px; }
-        .btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 14px 30px;
-            border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 20px; transition: transform 0.2s, box-shadow 0.2s; }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102,126,234,0.4); }
-        .status { margin-top: 20px; padding: 15px; border-radius: 8px; font-size: 14px; display: none; }
-        .status.success { background: #d4edda; color: #155724; display: block; }
-        .status.error { background: #f8d7da; color: #721c24; display: block; }
-        .info-box { background: #f8f9fa; border-radius: 8px; padding: 15px; margin-bottom: 20px; font-size: 13px; color: #666; }
-        .info-box code { background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
-        .api-info { background: #e8f4fd; border-left: 4px solid #667eea; padding: 15px; margin-top: 20px; border-radius: 0 8px 8px 0; }
-        .api-info h3 { font-size: 14px; margin-bottom: 10px; color: #333; }
-        .api-info pre { background: #fff; padding: 10px; border-radius: 4px; font-size: 12px; margin-top: 5px; overflow-x: auto; }
-        .parsed-info { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 15px; margin-top: 15px; font-size: 12px; display: none; }
-        .parsed-info h4 { color: #0369a1; margin-bottom: 10px; }
-        .parsed-info .item { margin: 5px 0; color: #555; }
-        .parsed-info .item span { color: #059669; font-family: monospace; }
+        *{box-sizing:border-box;margin:0;padding:0;}
+:root{
+            --bg:#f8f9fa;
+            --surface:#ffffff;
+            --surface-2:#f1f3f4;
+            --input-bg:#ffffff;
+            --code-bg:#f8f9fa;
+            --border:#e0e3e7;
+            --text:#202124;
+            --muted:#5f6368;
+            --blue:#1a73e8;
+            --green:#34a853;
+            --yellow:#fbbc04;
+            --red:#ea4335;
+            --shadow:0 1px 2px rgba(60,64,67,.08),0 2px 6px rgba(60,64,67,.12);
+        }
+        [data-theme="dark"]{
+            --bg:#202124;
+            --surface:#303134;
+            --surface-2:#3c4043;
+            --input-bg:#303134;
+            --code-bg:#282a2d;
+            --border:#5f6368;
+            --text:#e8eaed;
+            --muted:#9aa0a6;
+            --blue:#8ab4f8;
+            --green:#81c995;
+            --yellow:#fdd663;
+            --red:#f28b82;
+            --shadow:0 1px 2px rgba(0,0,0,.2),0 2px 6px rgba(0,0,0,.3);
+        }
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;overflow:hidden;}
+        ::-webkit-scrollbar{width:10px;height:10px;}
+        ::-webkit-scrollbar-track{background:var(--bg);}
+        ::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--border) 70%, var(--muted));border-radius:999px;border:2px solid var(--bg);}
+        ::-webkit-scrollbar-thumb:hover{background:var(--muted);}
+        .sidebar{width:248px;background:var(--surface);height:100vh;position:fixed;left:0;top:0;display:flex;flex-direction:column;border-right:1px solid var(--border);z-index:100;box-shadow:var(--shadow);transition:background .3s, border-color .3s;}
+        .sidebar-logo{padding:24px 20px;border-bottom:1px solid var(--border);font-size:20px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:10px;}
+        .sidebar-logo::before{content:'G';width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:800;background:linear-gradient(135deg,#4285f4 0 25%,#ea4335 25% 50%,#fbbc04 50% 75%,#34a853 75% 100%);}
+        .sidebar-nav{flex:1;padding:16px 8px;}
+        .nav-item{display:flex;align-items:center;padding:12px 14px;cursor:pointer;color:var(--muted);font-size:15px;transition:all .18s ease;border-radius:12px;margin:4px 6px;}
+        .nav-item:hover{color:var(--text);background:var(--surface-2);}
+        .nav-item.active{color:var(--blue);background:var(--surface-2);box-shadow:inset 0 0 0 1px rgba(26,115,232,.12);}
+        .nav-item span.icon{margin-right:12px;font-size:18px;}
+        .sidebar-footer{padding:16px 20px;border-top:1px solid var(--border);}
+        .sidebar-footer a{color:var(--muted);text-decoration:none;font-size:13px;display:flex;align-items:center;gap:6px;}
+        .sidebar-footer a:hover{color:var(--text);}
+        .main{margin-left:248px;flex:1;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);transition:background .3s;}
+        .tab-content{display:none;flex:1;flex-direction:column;min-height:0;background:var(--bg);}
+        .tab-content.active{display:flex;}
+        .chat-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface);backdrop-filter:saturate(180%) blur(8px);box-shadow:0 1px 0 rgba(60,64,67,.06);transition:background .3s, border-color .3s;}
+        .chat-header select{background:var(--surface);color:var(--text);border:1px solid var(--border);padding:9px 12px;border-radius:999px;font-size:14px;outline:none;cursor:pointer;box-shadow:var(--shadow);}
+        .chat-shell{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg);}
+        .chat-messages{flex:1;min-height:0;overflow-y:auto;padding:22px 20px 16px;display:flex;flex-direction:column;gap:14px;background:var(--bg);}
+        .msg{max-width:78%;padding:14px 16px;border-radius:18px;font-size:14px;line-height:1.7;position:relative;word-wrap:break-word;white-space:pre-wrap;box-shadow:var(--shadow);}
+        .msg .msg-time{font-size:11px;color:#9aa0a6;margin-top:6px;display:block;}
+        .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:6px;border:none;}
+        .msg.user .msg-time{color:rgba(255,255,255,.8);}
+        .msg.assistant{align-self:flex-start;background:var(--surface);color:var(--text);border-bottom-left-radius:6px;border:1px solid var(--border);}
+        .msg.assistant pre{background:var(--bg);padding:12px;border-radius:10px;overflow-x:auto;margin:8px 0;font-size:13px;border:1px solid var(--border);}
+        .msg.assistant code{font-family:'Cascadia Code',Consolas,monospace;font-size:13px;}
+        .msg.assistant code:not(pre code){background:var(--surface-2);padding:2px 6px;border-radius:4px;}
+        .msg.assistant ul,.msg.assistant ol{padding-left:20px;margin:6px 0;}
+        .msg.assistant li{margin:3px 0;}
+        .msg.assistant strong{color:var(--blue);}
+        .msg.assistant em{color:var(--green);}
+        .msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:16px 24px;color:var(--muted);font-size:14px;}
+        .msg.thinking::before{content:'';display:inline-block;width:18px;height:18px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin 1s linear infinite;}
+        @keyframes spin{to{transform:rotate(360deg);}}
+        @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.58;}}
+        .chat-input-area{padding:14px 20px 18px;border-top:1px solid var(--border);background:var(--surface);backdrop-filter:saturate(180%) blur(10px);position:sticky;bottom:0;z-index:20;box-shadow:0 -1px 0 rgba(60,64,67,.05);transition:background .3s, border-color .3s;}
+        .chat-input-wrap{display:flex;align-items:flex-end;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:18px;padding:10px 12px;box-shadow:var(--shadow);}
+        .chat-input-wrap:focus-within{border-color:#aecbfa;box-shadow:0 0 0 3px rgba(26,115,232,.12),var(--shadow);}
+        .attach-btn{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px;display:flex;align-items:center;}
+        .attach-btn:hover{color:var(--blue);}
+        #chatInput{flex:1;background:transparent;border:none;color:var(--text);font-size:14px;resize:none;outline:none;max-height:140px;min-height:24px;line-height:1.6;font-family:inherit;}
+        .send-btn{background:linear-gradient(135deg,#1a73e8,#4285f4);border:none;color:#fff;width:40px;height:40px;border-radius:12px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 6px 16px rgba(26,115,232,.22);}
+        .send-btn:hover{filter:brightness(1.03);}
+        .send-btn:disabled{opacity:.42;cursor:not-allowed;box-shadow:none;}
+        .img-preview-area{display:flex;gap:8px;padding:0 0 8px 0;flex-wrap:wrap;}
+        .img-preview-item{position:relative;width:64px;height:64px;border-radius:12px;overflow:hidden;border:1px solid var(--border);box-shadow:var(--shadow);background:var(--surface);}
+        .img-preview-item img{width:100%;height:100%;object-fit:cover;}
+        .img-preview-item .remove-img{position:absolute;top:4px;right:4px;background:rgba(234,67,53,.95);color:#fff;border:none;width:20px;height:20px;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;}
+        .console-wrap{flex:1;overflow-y:auto;padding:22px;}
+        .console-toolbar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px;}
+        .console-action{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:999px;font-size:13px;cursor:pointer;box-shadow:var(--shadow);}
+        .console-action:hover{border-color:var(--border);background:var(--surface-2);}
+        .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px;}
+        .stats-grid-2{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;}
+        .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;text-align:left;box-shadow:var(--shadow);}
+        .stat-card .label{font-size:12px;color:var(--muted);margin-bottom:10px;letter-spacing:.2px;}
+        .stat-card .value{font-size:28px;font-weight:700;color:var(--text);}
+        .stat-card .sub{margin-top:8px;font-size:12px;color:var(--muted);}
+        .console-section{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:var(--shadow);}
+        .console-section h3{font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text);display:flex;align-items:center;gap:8px;}
+        .metric-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+        .metric-row{background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:14px;display:flex;justify-content:space-between;gap:12px;align-items:center;}
+        .metric-row .k{font-size:12px;color:var(--muted);}
+        .metric-row .v{font-size:13px;color:var(--text);font-weight:600;text-align:right;word-break:break-all;}
+        .model-bar{display:flex;align-items:center;gap:10px;margin:10px 0;}
+        .model-bar .name{width:220px;font-size:13px;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .model-bar .bar-bg{flex:1;height:24px;background:var(--surface-2);border-radius:999px;overflow:hidden;border:1px solid var(--border);}
+        .model-bar .bar-fill{height:100%;background:linear-gradient(90deg,#4285f4,#34a853);border-radius:999px;transition:width .35s;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:11px;color:#fff;min-width:30px;}
+        .api-key-display{font-family:monospace;font-size:14px;background:var(--surface-2);padding:12px 14px;border-radius:12px;border:1px solid var(--border);color:var(--blue);word-break:break-all;}
+        .base-url-display{font-family:monospace;font-size:14px;background:var(--surface-2);padding:12px 14px;border-radius:12px;border:1px solid var(--border);color:var(--green);margin-top:10px;word-break:break-all;}
+        .model-tag{display:inline-block;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 14px;border-radius:999px;font-size:13px;margin:4px;box-shadow:0 1px 0 rgba(60,64,67,.03);}
+        .rust-code{background:var(--code-bg);border:1px solid var(--border);border-radius:14px;padding:16px;font-family:'Cascadia Code',Consolas,monospace;font-size:12px;color:var(--text);overflow-x:auto;white-space:pre;line-height:1.6;max-height:520px;overflow-y:auto;}
+        .config-wrap{flex:1;overflow-y:auto;padding:22px;}
+        .config-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:24px;max-width:920px;margin:0 auto;box-shadow:var(--shadow);}
+        .config-card .section{margin-bottom:25px;}
+        .config-card .section-title{font-size:16px;font-weight:600;color:var(--text);margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid var(--border);}
+        .config-card .form-group{margin-bottom:15px;}
+        .config-card label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:5px;}
+        .config-card input,.config-card textarea{width:100%;padding:12px 15px;border:1px solid var(--border);border-radius:12px;font-size:14px;font-family:monospace;background:var(--input-bg);color:var(--text);transition:border-color .2s,box-shadow .2s;}
+        .config-card input:focus,.config-card textarea:focus{outline:none;border-color:#aecbfa;box-shadow:0 0 0 3px rgba(26,115,232,.12);}
+        .config-card textarea{resize:vertical;min-height:80px;}
+        .config-card .info-box{background:var(--surface-2);border-radius:14px;padding:15px;margin-bottom:20px;font-size:13px;color:var(--muted);border:1px solid var(--border);}
+        .config-card .info-box code{background:var(--surface);padding:2px 6px;border-radius:4px;color:var(--blue);}
+        .config-card .info-box a{color:#1a73e8;}
+        .config-card .required{color:var(--red);}
+        .config-card .optional{color:var(--muted);font-size:12px;}
+        .config-card .parsed-info{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:15px;margin-top:15px;font-size:12px;display:none;}
+        .config-card .parsed-info h4{color:var(--green);margin-bottom:10px;}
+        .config-card .parsed-info .item{margin:5px 0;color:var(--muted);}
+        .config-card .parsed-info .item span{color:#0b8043;font-family:monospace;}
+        .btn-primary{background:linear-gradient(135deg,#1a73e8,#4285f4);color:#fff;border:none;padding:14px 30px;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;width:100%;margin-top:20px;transition:transform .2s,box-shadow .2s;box-shadow:0 6px 16px rgba(26,115,232,.18);}
+        .btn-primary:hover{transform:translateY(-1px);box-shadow:0 10px 22px rgba(26,115,232,.22);}
+        .btn-primary:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none;}
+        .status-msg{margin-top:20px;padding:15px;border-radius:12px;font-size:14px;display:none;}
+        .status-msg.success{background:#f6fbf7;border:1px solid #d7f0dd;color:#0b8043;display:block;}
+        .status-msg.error{background:#fce8e6;border:1px solid #f7c6c2;color:#c5221f;display:block;}
+        .token-badge{font-size:12px;padding:6px 12px;border-radius:999px;font-weight:600;}
+        .token-badge.valid{background:#e6f4ea;color:#137333;}
+        .token-badge.invalid{background:#fce8e6;color:#c5221f;}
+        .token-badge.loading{background:#fef7e0;color:#b06000;}
+        @media(max-width:1100px){
+            .stats-grid,.stats-grid-2{grid-template-columns:repeat(2,1fr);}
+            .metric-list{grid-template-columns:1fr;}
+        }
+        @media(max-width:900px){
+            .sidebar{width:72px;}.sidebar-logo{padding:16px 10px;font-size:0;text-align:center;justify-content:center;}.sidebar-logo::after{content:'';}.nav-item{padding:12px 10px;justify-content:center;}.nav-item span.label{display:none;}.nav-item span.icon{margin-right:0;}.sidebar-footer{padding:10px;text-align:center;}.sidebar-footer a span{display:none;}.main{margin-left:72px;}.chat-header,.chat-messages,.chat-input-area,.console-wrap,.config-wrap{padding-left:14px;padding-right:14px;}.stats-grid,.stats-grid-2{grid-template-columns:1fr;}.model-bar .name{width:120px;}
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="card">
-            <div id="tokenStatus" class="token-status loading">🔄 检查中...</div>
-            <h1>🤖 Gemini API 配置</h1>
-            <p class="subtitle">配置 Google Gemini 的认证信息，保存后即可调用 API <a href="/admin/logout" style="float:right;color:#667eea;text-decoration:none;">退出登录</a></p>
-            
-            <div class="info-box">
-                <strong>获取方法：</strong><br>
-                1. 打开 <a href="https://gemini.google.com" target="_blank">gemini.google.com</a> 并登录<br>
-                2. F12 → 网络 → 发送内容到聊天 →  点击任意请求 → Copy 请求头内完整cookie
+    <div class="sidebar">
+        <div class="sidebar-logo">&#129302; Gemini API</div>
+        <div class="sidebar-nav">
+            <div class="nav-item active" onclick="switchTab('chat')"><span class="icon">&#128172;</span><span class="label">对话</span></div>
+            <div class="nav-item" onclick="switchTab('console')"><span class="icon">&#128202;</span><span class="label">控制台</span></div>
+            <div class="nav-item" onclick="switchTab('config')"><span class="icon">&#9881;&#65039;</span><span class="label">配置</span></div>
+        </div>
+        <div class="sidebar-footer">
+            <a href="#" onclick="toggleTheme();return false;" id="themeToggle">&#127769; <span>深色模式</span></a>
+            <a href="/admin/logout">&#128682; <span>退出登录</span></a>
+        </div>
+    </div>
+    <div class="main">
+        <!-- Chat Tab -->
+        <div id="tab-chat" class="tab-content active">
+            <div class="chat-shell">
+                <div class="chat-header">
+                    <span style="font-weight:600;">&#128172; 对话</span>
+                    <select id="modelSelect"></select>
+                    <span id="tokenBadge" class="token-badge loading">检查中...</span>
+                </div>
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-area">
+                    <div class="img-preview-area" id="imgPreview"></div>
+                    <div class="chat-input-wrap">
+                        <button class="attach-btn" onclick="document.getElementById('fileInput').click()" title="上传图片">&#128206;</button>
+                        <input type="file" id="fileInput" accept="image/jpeg,image/png,image/gif,image/webp" multiple style="display:none;" onchange="handleFiles(this.files)">
+                        <textarea id="chatInput" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"></textarea>
+                        <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="发送">&#10148;</button>
+                    </div>
+                </div>
             </div>
-            
-            <form id="configForm">
-                <div class="section">
-                    <div class="section-title">🔑 Cookie 配置</div>
-                    <div class="form-group">
-                        <label>完整 Cookie <span class="required">*</span></label>
-                        <textarea name="FULL_COOKIE" id="FULL_COOKIE" rows="6" placeholder="粘贴从浏览器复制的完整 Cookie 字符串，系统会自动解析所需字段和 Token..." required></textarea>
-                        <div id="parsedInfo" class="parsed-info">
-                            <h4>✅ 已解析的字段：</h4>
-                            <div id="parsedFields"></div>
-                        </div>
+        </div>
+        <!-- Console Tab -->
+        <div id="tab-console" class="tab-content">
+            <div class="console-wrap">
+                <div class="console-toolbar">
+                    <button class="console-action" onclick="refreshConsoleData()">刷新数据</button>
+                    <button class="console-action" onclick="refreshTokenNow()">刷新 Token</button>
+                    <button class="console-action" onclick="resetClientNow()">重置 Client</button>
+                    <button class="console-action" onclick="exportConsoleData()">导出统计</button>
+                    <button class="console-action" onclick="clearChatHistory()">清空对话</button>
+                </div>
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card"><div class="label">总请求数</div><div class="value" id="statReqs">-</div></div>
+                    <div class="stat-card"><div class="label">总 Token 用量</div><div class="value" id="statTokens">-</div></div>
+                    <div class="stat-card"><div class="label">Prompt Tokens</div><div class="value" id="statPrompt">-</div></div>
+                    <div class="stat-card"><div class="label">Completion Tokens</div><div class="value" id="statCompletion">-</div></div>
+                </div>
+                <div class="stats-grid-2">
+                    <div class="stat-card"><div class="label">运行时间</div><div class="value" id="statUptime" style="font-size:20px;">-</div></div>
+                    <div class="stat-card"><div class="label">Token 刷新次数</div><div class="value" id="statRefresh">-</div></div>
+                    <div class="stat-card"><div class="label">后台刷新</div><div class="value" id="statBackground" style="font-size:20px;">-</div></div>
+                    <div class="stat-card"><div class="label">Client 状态</div><div class="value" id="statClient" style="font-size:20px;">-</div></div>
+                </div>
+                <div class="console-section">
+                    <h3>&#128202; 模型使用统计</h3>
+                    <div id="modelUsageChart"><span style="color:#666;">暂无数据</span></div>
+                </div>
+                <div class="console-section">
+                    <h3>&#128273; API Keys 信息</h3>
+                    <div class="metric-list">
+                        <div class="metric-row"><div class="k">API Key</div><div class="v" id="dispApiKey"></div></div>
+                        <div class="metric-row"><div class="k">Base URL</div><div class="v" id="dispBaseUrl"></div></div>
+                        <div class="metric-row"><div class="k">接口路径</div><div class="v">/v1/chat/completions</div></div>
+                        <div class="metric-row"><div class="k">模型接口</div><div class="v">/v1/models</div></div>
                     </div>
                 </div>
-                
-                <div class="section">
-                    <div class="section-title">🎯 模型 ID 配置 <span class="optional">(可选，如果模型切换失效请更新)</span></div>
+                <div class="console-section">
+                    <h3>&#128640; 可用模型列表</h3>
+                    <div id="modelsList" style="margin-top:8px;"><span style="color:#666;">加载中...</span></div>
+                </div>
+                <div class="console-section">
+                    <h3>&#129408; Rust 对接文档</h3>
+                    <div class="rust-code" id="rustCode"></div>
+                </div>
+                <div class="console-section">
+                    <h3>&#128221; 最近运行信息</h3>
+                    <div class="metric-list">
+                        <div class="metric-row"><div class="k">Token 自动刷新</div><div class="v" id="statAutoRefresh">-</div></div>
+                        <div class="metric-row"><div class="k">后台定时刷新</div><div class="v" id="statBgRefresh">-</div></div>
+                        <div class="metric-row"><div class="k">当前模型数量</div><div class="v" id="statModelCount">-</div></div>
+                        <div class="metric-row"><div class="k">更新时间</div><div class="v" id="statUpdatedAt">-</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- Config Tab -->
+        <div id="tab-config" class="tab-content">
+            <div class="config-wrap">
+                <div class="config-card">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                        <h2 style="font-size:22px;">&#9881;&#65039; 配置管理</h2>
+                        <span id="cfgTokenBadge" class="token-badge loading">检查中...</span>
+                    </div>
                     <div class="info-box">
-                        <strong>获取方法：</strong>F12 → Network → 在 Gemini 中切换模型发送消息 → 找到请求头 <code>x-goog-ext-525001261-jspb</code> → 复制整个数组值粘贴到下方输入框
+                        <strong>获取方法：</strong><br>
+                        1. 打开 <a href="https://gemini.google.com" target="_blank">gemini.google.com</a> 并登录<br>
+                        2. F12 &#8594; 网络 &#8594; 发送内容到聊天 &#8594; 点击任意请求 &#8594; Copy 请求头内完整cookie
                     </div>
-                    <div class="form-group">
-                        <label>快速解析 <span class="optional">(粘贴请求头数组自动提取 ID)</span></label>
-                        <input type="text" id="MODEL_ID_PARSER" placeholder='粘贴如: [1,null,null,null,"56fdd199312815e2",null,null,0,[4],null,null,2]'>
-                        <div id="parsedModelId" class="parsed-info" style="margin-top:10px;">
-                            <h4>✅ 已提取的模型 ID：</h4>
-                            <div id="parsedModelIdValue"></div>
+                    <form id="configForm">
+                        <div class="section">
+                            <div class="section-title">&#128273; Cookie 配置</div>
+                            <div class="form-group">
+                                <label>完整 Cookie <span class="required">*</span></label>
+                                <textarea name="FULL_COOKIE" id="FULL_COOKIE" rows="6" placeholder="粘贴从浏览器复制的完整 Cookie 字符串..." required></textarea>
+                                <div id="parsedInfo" class="parsed-info">
+                                    <h4>&#10004; 已解析的字段：</h4>
+                                    <div id="parsedFields"></div>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                    <div class="form-group">
-                        <label>极速版 (Flash) ID</label>
-                        <input type="text" name="MODEL_ID_FLASH" id="MODEL_ID_FLASH" placeholder="56fdd199312815e2">
-                    </div>
-                    <div class="form-group">
-                        <label>Pro 版 ID</label>
-                        <input type="text" name="MODEL_ID_PRO" id="MODEL_ID_PRO" placeholder="e6fa609c3fa255c0">
-                    </div>
-                    <div class="form-group">
-                        <label>思考版 (Thinking) ID</label>
-                        <input type="text" name="MODEL_ID_THINKING" id="MODEL_ID_THINKING" placeholder="e051ce1aa80aa576">
-                    </div>
+                        <div class="section">
+                            <div class="section-title">&#127919; 模型 ID 配置 <span class="optional">(可选，如果模型切换失效请更新)</span></div>
+                            <div class="info-box">
+                                <strong>获取方法：</strong>F12 &#8594; Network &#8594; 在 Gemini 中切换模型发送消息 &#8594; 找到请求头 <code>x-goog-ext-525001261-jspb</code> &#8594; 复制整个数组值粘贴到下方输入框
+                            </div>
+                            <div class="form-group">
+                                <label>快速解析 <span class="optional">(粘贴请求头数组自动提取 ID)</span></label>
+                                <input type="text" id="MODEL_ID_PARSER" placeholder="粘贴如: [1,null,null,null,&quot;56fdd199312815e2&quot;,null,null,0,[4],null,null,2]">
+                                <div id="parsedModelId" class="parsed-info" style="margin-top:10px;">
+                                    <h4>&#10004; 已提取的模型 ID：</h4>
+                                    <div id="parsedModelIdValue"></div>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>极速版 (Flash) ID</label>
+                                <input type="text" name="MODEL_ID_FLASH" id="MODEL_ID_FLASH" placeholder="56fdd199312815e2">
+                            </div>
+                            <div class="form-group">
+                                <label>Pro 版 ID</label>
+                                <input type="text" name="MODEL_ID_PRO" id="MODEL_ID_PRO" placeholder="e6fa609c3fa255c0">
+                            </div>
+                            <div class="form-group">
+                                <label>思考版 (Thinking) ID</label>
+                                <input type="text" name="MODEL_ID_THINKING" id="MODEL_ID_THINKING" placeholder="e051ce1aa80aa576">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn-primary">&#128190; 保存配置</button>
+                    </form>
+                    <div id="cfgStatus" class="status-msg"></div>
                 </div>
-                
-                <button type="submit" class="btn">💾 保存配置</button>
-            </form>
-            
-            <div id="status" class="status"></div>
-            
-            <div class="api-info">
-                <h3>📡 API 调用信息</h3>
-                <p>Base URL: <strong id="baseUrl"></strong></p>
-                <p>API Key: <strong id="apiKey"></strong></p>
-                <p>可用模型: <code>gemini-3.0-flash</code> | <code>gemini-3.1-pro</code> | <code>gemini-3.0-flash-thinking</code></p>
-                
-                <h4 style="margin-top:15px;">💬 文本对话</h4>
-<pre>from openai import OpenAI
-client = OpenAI(base_url="<span id="codeUrl"></span>", api_key="<span id="codeKey"></span>")
-
-response = client.chat.completions.create(
-    model="gemini-3.0-flash",  # 或 gemini-3.1-pro / gemini-3.0-flash-thinking
-    messages=[{"role": "user", "content": "你好"}]
-)
-print(response.choices[0].message.content)</pre>
-
-                <h4 style="margin-top:15px;">🖼️ 图片识别</h4>
-<pre>import base64
-from openai import OpenAI
-client = OpenAI(base_url="<span id="codeUrl2"></span>", api_key="<span id="codeKey2"></span>")
-
-# 读取本地图片
-with open("image.png", "rb") as f:
-    img_b64 = base64.b64encode(f.read()).decode()
-
-response = client.chat.completions.create(
-    model="gemini-3.0-flash",
-    messages=[{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "请描述这张图片"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-        ]
-    }]
-)
-print(response.choices[0].message.content)</pre>
-
-                <h4 style="margin-top:15px;">🌊 流式响应</h4>
-<pre>stream = client.chat.completions.create(
-    model="gemini-3.0-flash",
-    messages=[{"role": "user", "content": "写一首诗"}],
-    stream=True
-)
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)</pre>
-
-                <h4 style="margin-top:15px;">📷 示例图片</h4>
-                <p style="font-size:12px;color:#666;">以下是 image.png 示例图片，可用于测试图片识别功能（点击放大）：</p>
-                <img id="sampleImage" src="/static/image.png" alt="示例图片" style="max-width:300px;border-radius:8px;margin-top:10px;border:1px solid #ddd;cursor:pointer;" onclick="showImageModal()" onerror="this.style.display='none';this.nextElementSibling.style.display='block';">
-                <p style="display:none;font-size:12px;color:#999;">（示例图片不可用，请确保 image.png 文件存在）</p>
             </div>
         </div>
     </div>
-    
-    <!-- 图片放大模态框 -->
-    <div id="imageModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;justify-content:center;align-items:center;cursor:pointer;" onclick="hideImageModal()">
-        <img src="/static/image.png" alt="示例图片" style="max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 0 30px rgba(0,0,0,0.5);">
-        <span style="position:absolute;top:20px;right:30px;color:white;font-size:30px;cursor:pointer;">&times;</span>
-    </div>
-    
+
     <script>
-        // 图片放大功能
-        function showImageModal() {
-            document.getElementById('imageModal').style.display = 'flex';
-            document.body.style.overflow = 'hidden';
-        }
-        function hideImageModal() {
-            document.getElementById('imageModal').style.display = 'none';
-            document.body.style.overflow = 'auto';
-        }
-        // ESC 键关闭
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') hideImageModal();
+    const API_KEY = "''' + API_KEY + '''";
+    const PORT = ''' + str(PORT) + ''';
+    const BASE_URL = location.protocol + "//" + location.host;
+
+    // ===== Theme System =====
+    (function() {
+        var saved = localStorage.getItem('theme');
+        var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var isDark = saved ? saved === 'dark' : prefersDark;
+        if (isDark) document.documentElement.setAttribute('data-theme', 'dark');
+        document.addEventListener('DOMContentLoaded', function() {
+            syncThemeInputs();
+            updateThemeButton();
         });
-        
-        const API_KEY = "''' + API_KEY + '''";
-        const PORT = ''' + str(PORT) + ''';
-        
-        document.getElementById('baseUrl').textContent = 'http://localhost:' + PORT + '/v1';
-        document.getElementById('apiKey').textContent = API_KEY;
-        document.getElementById('codeUrl').textContent = 'http://localhost:' + PORT + '/v1';
-        document.getElementById('codeKey').textContent = API_KEY;
-        document.getElementById('codeUrl2').textContent = 'http://localhost:' + PORT + '/v1';
-        document.getElementById('codeKey2').textContent = API_KEY;
-        
-        // 获取并显示 Token 状态
-        async function updateTokenStatus() {
-            const statusEl = document.getElementById('tokenStatus');
-            try {
-                const resp = await fetch('/v1/token/status', {
-                    headers: { 'Authorization': 'Bearer ' + API_KEY }
+    })();
+
+    function updateThemeButton() {
+        var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        var btn = document.getElementById('themeToggle');
+        if (!btn) return;
+        btn.innerHTML = isDark ? '&#9728;&#65039; <span>浅色模式</span>' : '&#127769; <span>深色模式</span>';
+    }
+
+    function toggleTheme() {
+        var html = document.documentElement;
+        var isDark = html.getAttribute('data-theme') === 'dark';
+        if (isDark) {
+            html.removeAttribute('data-theme');
+            localStorage.setItem('theme', 'light');
+        } else {
+            html.setAttribute('data-theme', 'dark');
+            localStorage.setItem('theme', 'dark');
+        }
+        updateThemeButton();
+        syncThemeInputs();
+    }
+
+    function syncThemeInputs() {
+        var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        var themeCard = document.querySelector('.config-card');
+        if (!themeCard) return;
+        themeCard.style.background = 'var(--surface)';
+        themeCard.querySelectorAll('input, textarea').forEach(function(el) {
+            el.style.background = 'var(--input-bg)';
+        });
+        var chatHeader = document.querySelector('.chat-header');
+        var chatInputArea = document.querySelector('.chat-input-area');
+        if (chatHeader) chatHeader.style.background = 'var(--surface)';
+        if (chatInputArea) chatInputArea.style.background = 'var(--surface)';
+        var codeBlocks = document.querySelectorAll('.rust-code, .msg.assistant pre');
+        codeBlocks.forEach(function(el) {
+            el.style.background = isDark ? 'var(--code-bg)' : 'var(--bg)';
+        });
+    }
+
+    // ===== Tab switching =====
+    function switchTab(name) {
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        document.getElementById('tab-' + name).classList.add('active');
+        var items = document.querySelectorAll('.nav-item');
+        var map = {chat:0, console:1, config:2};
+        if (map[name] !== undefined) items[map[name]].classList.add('active');
+        if (name === 'console') loadConsoleData();
+        if (name === 'config') loadConfigData();
+    }
+
+    // ===== Simple Markdown Renderer =====
+    function renderMd(text) {
+        if (!text) return '';
+        // Escape HTML
+        var s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        // Code blocks
+        s = s.replace(/```([\\s\\S]*?)```/g, function(m, code) {
+            return '<pre><code>' + code.replace(/^\\n/,'') + '</code></pre>';
+        });
+        // Inline code
+        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Bold
+        s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+        // Italic
+        s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+        // Unordered list
+        s = s.replace(/^[\\s]*[-*]\\s+(.+)$/gm, '<li>$1</li>');
+        s = s.replace(/(<li>.*<\\/li>)/gs, '<ul>$1</ul>');
+        // Ordered list
+        s = s.replace(/^[\\s]*\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
+        // Line breaks
+        s = s.replace(/\\n/g, '<br>');
+        // Clean up double <br> inside pre
+        s = s.replace(/<pre><code>(.*?)<\\/code><\\/pre>/gs, function(m, c) {
+            return '<pre><code>' + c.replace(/<br>/g, '\\n') + '</code></pre>';
+        });
+        return s;
+    }
+
+    function timeStr() {
+        var d = new Date();
+        return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0') + ':' + d.getSeconds().toString().padStart(2,'0');
+    }
+
+    // ===== Chat =====
+    var chatHistory = [];
+    var attachedImages = []; // [{base64, mime, name}]
+    var isSending = false;
+
+    // Load models into selector
+    async function loadModels() {
+        try {
+            var resp = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+API_KEY}});
+            var data = await resp.json();
+            var sel = document.getElementById('modelSelect');
+            sel.innerHTML = '';
+            (data.data || []).forEach(function(m) {
+                var opt = document.createElement('option');
+                opt.value = m.id; opt.textContent = m.id;
+                sel.appendChild(opt);
+            });
+            return data.data || [];
+        } catch(e) { console.error(e); return []; }
+    }
+
+    function handleFiles(files) {
+        for (var i = 0; i < files.length; i++) {
+            (function(file) {
+                if (!file.type.startsWith('image/')) return;
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    var base64 = e.target.result;
+                    attachedImages.push({base64: base64, mime: file.type, name: file.name});
+                    renderPreviews();
+                };
+                reader.readAsDataURL(file);
+            })(files[i]);
+        }
+        document.getElementById('fileInput').value = '';
+    }
+
+    function renderPreviews() {
+        var area = document.getElementById('imgPreview');
+        area.innerHTML = '';
+        attachedImages.forEach(function(img, idx) {
+            var div = document.createElement('div');
+            div.className = 'img-preview-item';
+            div.innerHTML = '<img src="' + img.base64 + '" alt="preview"><button class="remove-img" onclick="removeImg(' + idx + ')">&#215;</button>';
+            area.appendChild(div);
+        });
+    }
+
+    function removeImg(idx) {
+        attachedImages.splice(idx, 1);
+        renderPreviews();
+    }
+
+    function addMessage(role, content, extra) {
+        var container = document.getElementById('chatMessages');
+        var div = document.createElement('div');
+        div.className = 'msg ' + role;
+        if (role === 'assistant') {
+            div.innerHTML = renderMd(content) + '<span class="msg-time">' + timeStr() + '</span>';
+        } else if (role === 'thinking') {
+            div.textContent = content;
+        } else {
+            // User: show text + image thumbnails
+            var html = '';
+            if (extra && extra.images && extra.images.length > 0) {
+                html += '<div style="margin-bottom:8px;">';
+                extra.images.forEach(function(src) {
+                    html += '<img src="' + src + '" style="max-width:80px;max-height:80px;border-radius:6px;margin-right:4px;">';
                 });
-                const data = await resp.json();
-                
-                if (data.has_snlm0e && data.total_refresh_count >= 0) {
-                    statusEl.className = 'token-status valid';
-                    statusEl.innerHTML = '✅ Token 有效 | 已刷新 ' + data.total_refresh_count + ' 次';
-                } else {
-                    statusEl.className = 'token-status invalid';
-                    statusEl.innerHTML = '❌ Token 已失效';
-                }
-            } catch (e) {
-                statusEl.className = 'token-status invalid';
-                statusEl.innerHTML = '❌ 无法获取状态';
+                html += '</div>';
             }
+            html += text2html(content) + '<span class="msg-time">' + timeStr() + '</span>';
+            div.innerHTML = html;
         }
-        
-        // 页面加载时获取状态，并每 30 秒刷新一次
-        updateTokenStatus();
-        setInterval(updateTokenStatus, 30000);
-        
-        // 解析模型 ID (从 x-goog-ext-525001261-jspb 数组中提取)
-        function parseModelId(input) {
-            try {
-                // 尝试解析 JSON 数组
-                const arr = JSON.parse(input);
-                if (Array.isArray(arr) && arr.length > 4 && typeof arr[4] === 'string') {
-                    return arr[4];
-                }
-            } catch (e) {
-                // 尝试用正则提取 16 位十六进制字符串
-                const match = input.match(/["\']([a-f0-9]{16})["\']/i);
-                if (match) {
-                    return match[1];
-                }
-            }
-            return null;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
+    }
+
+    function text2html(t) {
+        return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
+    }
+
+    async function sendMessage() {
+        if (isSending) return;
+        var input = document.getElementById('chatInput');
+        var text = input.value.trim();
+        if (!text && attachedImages.length === 0) return;
+
+        isSending = true;
+        document.getElementById('sendBtn').disabled = true;
+
+        // Build user message content
+        var content;
+        var imgSrcs = [];
+        if (attachedImages.length > 0) {
+            content = [];
+            if (text) content.push({type: 'text', text: text});
+            attachedImages.forEach(function(img) {
+                imgSrcs.push(img.base64);
+                content.push({type: 'image_url', image_url: {url: img.base64}});
+            });
+        } else {
+            content = text;
         }
-        
-        // 监听模型 ID 解析输入
-        document.getElementById('MODEL_ID_PARSER').addEventListener('input', (e) => {
-            const modelId = parseModelId(e.target.value);
-            const container = document.getElementById('parsedModelIdValue');
-            const infoBox = document.getElementById('parsedModelId');
-            
-            if (modelId) {
-                container.innerHTML = '<div class="item">提取到的 ID: <span style="color:#059669;font-family:monospace;">' + modelId + '</span></div>' +
-                    '<div style="margin-top:10px;">' +
-                    '<button type="button" onclick="fillModelId(\\'flash\\', \\'' + modelId + '\\')" style="margin-right:5px;padding:5px 10px;cursor:pointer;">填入极速版</button>' +
-                    '<button type="button" onclick="fillModelId(\\'pro\\', \\'' + modelId + '\\')" style="margin-right:5px;padding:5px 10px;cursor:pointer;">填入Pro版</button>' +
-                    '<button type="button" onclick="fillModelId(\\'thinking\\', \\'' + modelId + '\\')" style="padding:5px 10px;cursor:pointer;">填入思考版</button>' +
-                    '</div>';
-                infoBox.style.display = 'block';
+
+        // Show user message
+        addMessage('user', text, {images: imgSrcs});
+        input.value = '';
+        input.style.height = 'auto';
+        attachedImages = [];
+        renderPreviews();
+
+        // Add to history
+        chatHistory.push({role: 'user', content: content});
+
+        // Show thinking
+        var thinkDiv = addMessage('thinking', '');
+
+        try {
+            var model = document.getElementById('modelSelect').value || 'gemini-3.0-flash';
+            var resp = await fetch('/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + API_KEY
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: chatHistory,
+                    stream: false
+                })
+            });
+            var data = await resp.json();
+            thinkDiv.remove();
+
+            if (data.error) {
+                addMessage('assistant', '错误: ' + (data.error.message || data.detail || JSON.stringify(data.error)));
             } else {
-                infoBox.style.display = 'none';
+                var reply = data.choices[0].message.content || '';
+                addMessage('assistant', reply);
+                chatHistory.push({role: 'assistant', content: reply});
+            }
+        } catch(e) {
+            thinkDiv.remove();
+            addMessage('assistant', '请求失败: ' + e.message);
+        }
+
+        isSending = false;
+        document.getElementById('sendBtn').disabled = false;
+    }
+
+    // Auto-resize textarea
+    document.getElementById('chatInput').addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+    });
+    document.getElementById('chatInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    // ===== Token Status =====
+    async function updateTokenBadge() {
+        var badges = [document.getElementById('tokenBadge'), document.getElementById('cfgTokenBadge')];
+        try {
+            var resp = await fetch('/v1/token/status', {headers:{'Authorization':'Bearer '+API_KEY}});
+            var data = await resp.json();
+            badges.forEach(function(b) {
+                if (!b) return;
+                if (data.has_snlm0e) {
+                    b.className = 'token-badge valid';
+                    b.textContent = 'Token 有效 | 已刷新 ' + data.total_refresh_count + ' 次';
+                } else {
+                    b.className = 'token-badge invalid';
+                    b.textContent = 'Token 已失效';
+                }
+            });
+        } catch(e) {
+            badges.forEach(function(b) {
+                if (!b) return;
+                b.className = 'token-badge invalid';
+                b.textContent = '无法获取状态';
+            });
+        }
+    }
+
+    // ===== Console =====
+    var consoleTimer = null;
+    var lastConsoleSnapshot = null;
+
+    function refreshConsoleData() {
+        loadConsoleData();
+    }
+
+    function refreshTokenNow() {
+        fetch('/v1/token/refresh', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + API_KEY}
+        }).then(function(r) { return r.json(); }).then(function() {
+            updateTokenBadge();
+            loadConsoleData();
+        }).catch(function(err) {
+            console.error(err);
+        });
+    }
+
+    function resetClientNow() {
+        fetch('/v1/client/reset', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + API_KEY}
+        }).then(function(r) { return r.json(); }).then(function() {
+            loadConsoleData();
+        }).catch(function(err) {
+            console.error(err);
+        });
+    }
+
+    function exportConsoleData() {
+        var payload = {
+            exported_at: new Date().toISOString(),
+            snapshot: lastConsoleSnapshot,
+            chat_count: chatHistory.length,
+            image_count: attachedImages.length
+        };
+        var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'gemini-console-export.json';
+        a.click();
+        setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+    }
+
+    function clearChatHistory() {
+        chatHistory = [];
+        attachedImages = [];
+        renderPreviews();
+        document.getElementById('chatMessages').innerHTML = '';
+    }
+
+    async function loadConsoleData() {
+        try {
+            var resp = await fetch('/admin/stats', {credentials:'same-origin'});
+            if (resp.status === 401) { location.href = '/admin/login'; return; }
+            var s = await resp.json();
+            lastConsoleSnapshot = s;
+            document.getElementById('statReqs').textContent = s.total_requests;
+            document.getElementById('statTokens').textContent = s.total_tokens;
+            document.getElementById('statPrompt').textContent = s.total_prompt_tokens;
+            document.getElementById('statCompletion').textContent = s.total_completion_tokens;
+            document.getElementById('statUptime').textContent = s.uptime;
+            document.getElementById('statRefresh').textContent = s.token_refresh_count;
+            document.getElementById('statBackground').textContent = s.background_refresh_enabled ? '开启' : '关闭';
+            document.getElementById('statClient').textContent = s.client_active ? '在线' : '离线';
+            document.getElementById('statAutoRefresh').textContent = s.auto_refresh_enabled ? '开启' : '关闭';
+            document.getElementById('statBgRefresh').textContent = s.background_refresh_enabled ? '开启' : '关闭';
+            document.getElementById('statUpdatedAt').textContent = new Date().toLocaleString();
+
+            // Model usage chart
+            var chart = document.getElementById('modelUsageChart');
+            var models = s.requests_by_model || {};
+            var keys = Object.keys(models);
+            if (keys.length === 0) {
+                chart.innerHTML = '<span style="color:#666;">暂无请求数据</span>';
+            } else {
+                var maxVal = Math.max.apply(null, keys.map(function(k){return models[k];}));
+                chart.innerHTML = '';
+                keys.sort(function(a, b) { return models[b] - models[a]; });
+                keys.forEach(function(k) {
+                    var pct = maxVal > 0 ? (models[k] / maxVal * 100) : 0;
+                    var row = document.createElement('div');
+                    row.className = 'model-bar';
+                    row.innerHTML = '<div class="name">' + k + '</div><div class="bar-bg"><div class="bar-fill" style="width:' + pct + '%">' + models[k] + '</div></div>';
+                    chart.appendChild(row);
+                });
+                document.getElementById('statModelCount').textContent = keys.length;
+            }
+        } catch(e) { console.error('Stats error:', e); }
+
+        // API Key & URL
+        var masked = API_KEY.substring(0,6) + '****' + API_KEY.substring(API_KEY.length-4);
+        document.getElementById('dispApiKey').textContent = masked;
+        document.getElementById('dispBaseUrl').textContent = BASE_URL + '/v1';
+
+        // Models list
+        try {
+            var resp2 = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+API_KEY}});
+            var mdata = await resp2.json();
+            var ml = document.getElementById('modelsList');
+            ml.innerHTML = '';
+            (mdata.data || []).forEach(function(m) {
+                var tag = document.createElement('span');
+                tag.className = 'model-tag';
+                tag.textContent = m.id;
+                ml.appendChild(tag);
+            });
+            document.getElementById('statModelCount').textContent = (mdata.data || []).length;
+        } catch(e) {}
+
+        // Rust code
+        document.getElementById('rustCode').textContent = '// Cargo.toml 依赖\\n// [dependencies]\\n// reqwest = { version = "0.12", features = ["json"] }\\n// serde = { version = "1", features = ["derive"] }\\n// serde_json = "1"\\n// tokio = { version = "1", features = ["full"] }\\n\\nuse serde::{Deserialize, Serialize};\\n\\n#[derive(Serialize)]\\nstruct ChatRequest {\\n    model: String,\\n    messages: Vec<Message>,\\n    stream: bool,\\n}\\n\\n#[derive(Serialize)]\\nstruct Message {\\n    role: String,\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ChatResponse {\\n    choices: Vec<Choice>,\\n    usage: Usage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Choice {\\n    message: ResponseMessage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ResponseMessage {\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Usage {\\n    prompt_tokens: u32,\\n    completion_tokens: u32,\\n    total_tokens: u32,\\n}\\n\\n#[tokio::main]\\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\\n    let client = reqwest::Client::new();\\n    \\n    let request = ChatRequest {\\n        model: "gemini-3.0-flash".to_string(),\\n        messages: vec![Message {\\n            role: "user".to_string(),\\n            content: "你好".to_string(),\\n        }],\\n        stream: false,\\n    };\\n\\n    let response = client\\n        .post("' + BASE_URL + '/v1/chat/completions")\\n        .header("Authorization", "Bearer ' + API_KEY + '")\\n        .json(&request)\\n        .send()\\n        .await?\\n        .json::<ChatResponse>()\\n        .await?;\\n\\n    println!("回复: {}", response.choices[0].message.content);\\n    println!("Token 用量: {}", response.usage.total_tokens);\\n    \\n    Ok(())\\n}';
+
+        // Auto refresh
+        if (consoleTimer) clearInterval(consoleTimer);
+        consoleTimer = setInterval(loadConsoleData, 10000);
+    }
+
+    // ===== Config =====
+    var configLoaded = false;
+
+    // Cookie field mapping
+    var cookieFields = {
+        '__Secure-1PSID': 'SECURE_1PSID',
+        '__Secure-1PSIDTS': 'SECURE_1PSIDTS',
+        'SAPISID': 'SAPISID',
+        '__Secure-1PAPISID': 'SECURE_1PAPISID',
+        'SID': 'SID',
+        'HSID': 'HSID',
+        'SSID': 'SSID',
+        'APISID': 'APISID'
+    };
+
+    function parseCookie(str) {
+        var result = {};
+        if (!str) return result;
+        str.split(';').forEach(function(item) {
+            var t = item.trim();
+            var eq = t.indexOf('=');
+            if (eq > 0) {
+                var k = t.substring(0, eq).trim();
+                var v = t.substring(eq + 1).trim();
+                if (cookieFields[k]) result[cookieFields[k]] = v;
             }
         });
-        
-        // 填入模型 ID
-        function fillModelId(type, id) {
-            const fieldMap = {
-                'flash': 'MODEL_ID_FLASH',
-                'pro': 'MODEL_ID_PRO',
-                'thinking': 'MODEL_ID_THINKING'
-            };
-            document.getElementById(fieldMap[type]).value = id;
-        }
-        
-        // Cookie 字段映射
-        const cookieFields = {
-            '__Secure-1PSID': 'SECURE_1PSID',
-            '__Secure-1PSIDTS': 'SECURE_1PSIDTS',
+        return result;
+    }
+
+    function showParsedFields(parsed) {
+        var container = document.getElementById('parsedFields');
+        var infoBox = document.getElementById('parsedInfo');
+        var names = {
+            'SECURE_1PSID': '__Secure-1PSID',
+            'SECURE_1PSIDTS': '__Secure-1PSIDTS',
             'SAPISID': 'SAPISID',
-            '__Secure-1PAPISID': 'SECURE_1PAPISID',
             'SID': 'SID',
             'HSID': 'HSID',
             'SSID': 'SSID',
             'APISID': 'APISID'
         };
-        
-        // 解析 Cookie 字符串
-        function parseCookie(cookieStr) {
-            const result = {};
-            if (!cookieStr) return result;
-            
-            cookieStr.split(';').forEach(item => {
-                const trimmed = item.trim();
-                const eqIndex = trimmed.indexOf('=');
-                if (eqIndex > 0) {
-                    const key = trimmed.substring(0, eqIndex).trim();
-                    const value = trimmed.substring(eqIndex + 1).trim();
-                    if (cookieFields[key]) {
-                        result[cookieFields[key]] = value;
-                    }
-                }
-            });
-            return result;
-        }
-        
-        // 显示解析结果
-        function showParsedFields(parsed) {
-            const container = document.getElementById('parsedFields');
-            const infoBox = document.getElementById('parsedInfo');
-            
-            const fieldNames = {
-                'SECURE_1PSID': '__Secure-1PSID',
-                'SECURE_1PSIDTS': '__Secure-1PSIDTS',
-                'SAPISID': 'SAPISID',
-                'SID': 'SID',
-                'HSID': 'HSID',
-                'SSID': 'SSID',
-                'APISID': 'APISID'
-            };
-            
-            let html = '';
-            let hasFields = false;
-            for (const [key, name] of Object.entries(fieldNames)) {
-                if (parsed[key]) {
-                    hasFields = true;
-                    const shortValue = parsed[key].length > 30 ? parsed[key].substring(0, 30) + '...' : parsed[key];
-                    html += '<div class="item">' + name + ': <span>' + shortValue + '</span></div>';
-                }
-            }
-            
-            if (hasFields) {
-                container.innerHTML = html;
-                infoBox.style.display = 'block';
-            } else {
-                infoBox.style.display = 'none';
+        var html = '';
+        var has = false;
+        for (var key in names) {
+            if (parsed[key]) {
+                has = true;
+                var sv = parsed[key].length > 30 ? parsed[key].substring(0,30) + '...' : parsed[key];
+                html += '<div class="item">' + names[key] + ': <span>' + sv + '</span></div>';
             }
         }
-        
-        // 监听 Cookie 输入
-        document.getElementById('FULL_COOKIE').addEventListener('input', (e) => {
-            const parsed = parseCookie(e.target.value);
-            showParsedFields(parsed);
-        });
-        
-        // 加载配置
-        fetch('/admin/config', {credentials: 'same-origin'}).then(r => {
+        if (has) { container.innerHTML = html; infoBox.style.display = 'block'; }
+        else { infoBox.style.display = 'none'; }
+    }
+
+    function parseModelId(input) {
+        try {
+            var arr = JSON.parse(input);
+            if (Array.isArray(arr) && arr.length > 4 && typeof arr[4] === 'string') return arr[4];
+        } catch(e) {
+            var match = input.match(/["']([a-f0-9]{16})["']/i);
+            if (match) return match[1];
+        }
+        return null;
+    }
+
+    function fillModelId(type, id) {
+        var map = {flash:'MODEL_ID_FLASH', pro:'MODEL_ID_PRO', thinking:'MODEL_ID_THINKING'};
+        document.getElementById(map[type]).value = id;
+    }
+
+    function loadConfigData() {
+        if (configLoaded) return;
+        fetch('/admin/config', {credentials:'same-origin'}).then(function(r) {
             if (!r.ok) throw new Error('未登录');
             return r.json();
-        }).then(config => {
+        }).then(function(config) {
+            configLoaded = true;
             if (config.FULL_COOKIE) {
                 document.getElementById('FULL_COOKIE').value = config.FULL_COOKIE;
                 showParsedFields(parseCookie(config.FULL_COOKIE));
             }
-            // 加载模型 ID
             if (config.MODEL_IDS) {
                 document.getElementById('MODEL_ID_FLASH').value = config.MODEL_IDS.flash || '';
                 document.getElementById('MODEL_ID_PRO').value = config.MODEL_IDS.pro || '';
                 document.getElementById('MODEL_ID_THINKING').value = config.MODEL_IDS.thinking || '';
             }
-        }).catch(err => {
-            console.log('加载配置失败:', err);
-        });
-        
-        document.getElementById('configForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const formData = new FormData(e.target);
-            const data = Object.fromEntries(formData.entries());
-            
-            // 构建模型 ID 对象
-            data.MODEL_IDS = {
-                flash: data.MODEL_ID_FLASH || '',
-                pro: data.MODEL_ID_PRO || '',
-                thinking: data.MODEL_ID_THINKING || ''
-            };
-            delete data.MODEL_ID_FLASH;
-            delete data.MODEL_ID_PRO;
-            delete data.MODEL_ID_THINKING;
-            
-            const statusEl = document.getElementById('status');
-            statusEl.className = 'status';
-            statusEl.style.display = 'none';
-            statusEl.textContent = '';
-            
-            // 显示保存中状态
-            const submitBtn = e.target.querySelector('button[type="submit"]');
-            const originalText = submitBtn.textContent;
-            submitBtn.textContent = '⏳ 保存中...';
-            submitBtn.disabled = true;
-            
-            try {
-                const resp = await fetch('/admin/save', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    credentials: 'same-origin',
-                    body: JSON.stringify(data)
+        }).catch(function(e) { console.log('加载配置失败:', e); });
+    }
+
+    // Cookie input listener
+    document.getElementById('FULL_COOKIE').addEventListener('input', function(e) {
+        showParsedFields(parseCookie(e.target.value));
+    });
+
+    // Model ID parser listener
+    document.getElementById('MODEL_ID_PARSER').addEventListener('input', function(e) {
+        var mid = parseModelId(e.target.value);
+        var container = document.getElementById('parsedModelIdValue');
+        var box = document.getElementById('parsedModelId');
+        if (mid) {
+            container.innerHTML = '';
+            var info = document.createElement('div');
+            info.className = 'item';
+            info.innerHTML = '提取到的 ID: <span style="color:#4ade80;font-family:monospace;">' + mid + '</span>';
+            container.appendChild(info);
+
+            var btnWrap = document.createElement('div');
+            btnWrap.style.marginTop = '10px';
+
+            ['flash', 'pro', 'thinking'].forEach(function(type) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.style.marginRight = '5px';
+                btn.style.padding = '5px 10px';
+                btn.style.cursor = 'pointer';
+                btn.style.background = '#2a2a4a';
+                btn.style.color = '#e0e0e0';
+                btn.style.border = '1px solid #3a3a5a';
+                btn.style.borderRadius = '4px';
+                btn.textContent = type === 'flash' ? '填入极速版' : (type === 'pro' ? '填入Pro版' : '填入思考版');
+                btn.addEventListener('click', function() {
+                    fillModelId(type, mid);
                 });
-                
-                if (resp.status === 401) {
-                    window.location.href = '/admin/login';
-                    return;
-                }
-                
-                const result = await resp.json();
-                
-                if (result.success) {
-                    statusEl.className = 'status success';
-                    statusEl.innerHTML = '✅ ' + result.message + '<br><br>💡 <strong>配置已生效，无需重启服务！</strong>';
-                } else {
-                    statusEl.className = 'status error';
-                    statusEl.textContent = '❌ ' + result.message;
-                }
-                statusEl.style.display = 'block';
-            } catch (err) {
-                statusEl.className = 'status error';
-                statusEl.textContent = '❌ 保存失败: ' + err.message;
-                statusEl.style.display = 'block';
-            } finally {
-                submitBtn.textContent = originalText;
-                submitBtn.disabled = false;
+                btnWrap.appendChild(btn);
+            });
+
+            container.appendChild(btnWrap);
+            box.style.display = 'block';
+        } else {
+            box.style.display = 'none';
+        }
+    });
+
+    // Config form submit
+    document.getElementById('configForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        var formData = new FormData(e.target);
+        var data = {};
+        formData.forEach(function(v, k) { data[k] = v; });
+        data.MODEL_IDS = {
+            flash: data.MODEL_ID_FLASH || '',
+            pro: data.MODEL_ID_PRO || '',
+            thinking: data.MODEL_ID_THINKING || ''
+        };
+        delete data.MODEL_ID_FLASH;
+        delete data.MODEL_ID_PRO;
+        delete data.MODEL_ID_THINKING;
+
+        var statusEl = document.getElementById('cfgStatus');
+        statusEl.className = 'status-msg';
+        statusEl.style.display = 'none';
+
+        var btn = e.target.querySelector('button[type="submit"]');
+        var origText = btn.textContent;
+        btn.textContent = '保存中...';
+        btn.disabled = true;
+
+        try {
+            var resp = await fetch('/admin/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'same-origin',
+                body: JSON.stringify(data)
+            });
+            if (resp.status === 401) { location.href = '/admin/login'; return; }
+            var result = await resp.json();
+            if (result.success) {
+                statusEl.className = 'status-msg success';
+                statusEl.innerHTML = '&#10004; ' + result.message + '<br><br>配置已生效，无需重启服务！';
+            } else {
+                statusEl.className = 'status-msg error';
+                statusEl.textContent = '&#10008; ' + result.message;
             }
-        });
+            statusEl.style.display = 'block';
+            updateTokenBadge();
+        } catch(err) {
+            statusEl.className = 'status-msg error';
+            statusEl.textContent = '保存失败: ' + err.message;
+            statusEl.style.display = 'block';
+        } finally {
+            btn.textContent = origText;
+            btn.disabled = false;
+        }
+    });
+
+    // ===== Init =====
+    loadModels();
+    updateTokenBadge();
+    setInterval(updateTokenBadge, 30000);
     </script>
 </body>
 </html>'''
@@ -1170,7 +1673,8 @@ async def admin_login(request: Request):
     username = data.get("username", "")
     password = data.get("password", "")
     
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+    # 使用 PostgreSQL 数据库验证账号密码
+    if db.authenticate_user(username, password):
         token = generate_session_token()
         _admin_sessions.add(token)
         response = JSONResponse({"success": True, "message": "登录成功"})
@@ -1646,9 +2150,8 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                     )]
                 )
                 yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                
+
                 if tool_calls:
-                    # 流式返回工具调用
                     for tc in tool_calls:
                         fn = tc.get("function", {})
                         chunk_data = ChatCompletionChunkResponse(
@@ -1672,7 +2175,6 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                             )]
                         )
                         yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                        # OpenAI 兼容客户端通常依赖增量 tool_calls，继续输出相同的工具调用块即可。
                 else:
                     chunk_data = ChatCompletionChunkResponse(
                         id=completion_id,
@@ -1685,7 +2187,7 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                         )]
                     )
                     yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                
+
                 chunk_data = ChatCompletionChunkResponse(
                     id=completion_id,
                     created=created_time,
@@ -1698,11 +2200,12 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                 )
                 yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
-            
+
             if tool_calls:
                 response_message = ChatCompletionResponseMessage(content=final_content if final_content else None, tool_calls=tool_calls)
             else:
                 response_message = ChatCompletionResponseMessage(content=final_content)
+
             response_data = ChatCompletionResponse(
                 id=completion_id,
                 created=created_time,
@@ -1712,8 +2215,14 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             )
             log_api_call(request_log, response_data.model_dump())
 
+            _stats["total_requests"] += 1
+            _stats["total_prompt_tokens"] += response.usage.prompt_tokens
+            _stats["total_completion_tokens"] += response.usage.completion_tokens
+            _stats["total_tokens"] += response.usage.total_tokens
+            _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
+
             return StreamingResponse(
-                generate_stream(), 
+                generate_stream(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -1739,6 +2248,13 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         )
         
         log_api_call(request_log, response_data.model_dump())
+
+        # 更新统计
+        _stats["total_requests"] += 1
+        _stats["total_prompt_tokens"] += response.usage.prompt_tokens
+        _stats["total_completion_tokens"] += response.usage.completion_tokens
+        _stats["total_tokens"] += response.usage.total_tokens
+        _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
         
         return JSONResponse(
             content=response_data.model_dump(),

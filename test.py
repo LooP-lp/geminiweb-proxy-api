@@ -7,7 +7,7 @@ import base64
 from openai import OpenAI
 
 # 配置
-BASE_URL = "http://127.0.0.1:7788/v1"
+BASE_URL = "http://yj.nm.cn:7788/v1"
 API_KEY = "sk-geminixxxxx"
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
@@ -26,7 +26,7 @@ def chat_text():
     print("=" * 50)
     
     response = client.chat.completions.create(
-        model="gemini-3.1-pro",
+        model="gemini-3.0-flash-thinking",
         messages=[{"role": "user", "content": "具体介绍一下自己，现在几点了"}]
     )
     print(response.choices[0].message.content)
@@ -84,7 +84,7 @@ def chat_image_generation():
     print("=" * 50)
     
     response = client.chat.completions.create(
-        model="gemini-3.1-pro",
+        model="gemini-3.0-flash-thinking",
         messages=[{"role": "user", "content": "生成一张可爱的紫色猫耳女仆图片"}]
     )
     print(response.choices[0].message.content)
