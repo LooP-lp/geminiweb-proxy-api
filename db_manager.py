@@ -30,12 +30,21 @@ class DBManager:
         """确保所有必要的表都已创建"""
         try:
             with self.conn.cursor() as cur:
+                # users 表
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        username VARCHAR(50) UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
                 # api_keys 表
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS api_keys (
                         id SERIAL PRIMARY KEY,
                         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        api_key VARCHAR(32) UNIQUE NOT NULL,
+                        api_key VARCHAR(52) UNIQUE NOT NULL,
                         note VARCHAR(200) DEFAULT '',
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                         last_used_at TIMESTAMP WITH TIME ZONE,
@@ -121,13 +130,34 @@ class DBManager:
             print(f"获取用户ID失败: {e}")
             return None
 
+    def list_all_users(self):
+        """列出所有用户"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT id, username, created_at FROM users ORDER BY id")
+                rows = cur.fetchall()
+                return [{"id": r[0], "username": r[1], "created_at": r[2].isoformat()} for r in rows]
+        except Exception as e:
+            print(f"获取用户列表失败: {e}")
+            return []
+
+    def delete_user_data(self, user_id):
+        """删除用户及其所有相关数据"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"删除用户失败: {e}")
+            return False
+
     # ============ API Key 管理 ============
 
     @staticmethod
     def _generate_api_key():
-        """生成 sk-xxxx 格式的16位随机API Key"""
+        """生成 sk-xxxx 格式的48位随机API Key"""
         chars = string.ascii_letters + string.digits  # 大小写+数字
-        random_part = ''.join(random.choices(chars, k=16))
+        random_part = ''.join(random.choices(chars, k=48))
         return f"sk-{random_part}"
 
     def create_api_key(self, user_id, note=""):
