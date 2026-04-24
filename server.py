@@ -24,9 +24,10 @@ import asyncio
 import threading
 
 # ============ 配置 ============
-API_KEY = "sk-geminixxxxx"
+API_KEY = "sk-geminixxxxx"  # 兼容旧版单key鉴权
 HOST = "0.0.0.0"
 PORT = 7788
+ALLOW_DB_API_KEYS = True  # 允许使用数据库中的API Key
 CONFIG_FILE = "config_data.json"
 # Token 自动刷新配置
 TOKEN_REFRESH_INTERVAL_MIN = 200  # 刷新间隔最小秒数
@@ -41,8 +42,12 @@ import random
 from datetime import datetime
 
 # 初始化数据库连接
-from db_manager import DBManager
-db = DBManager()
+try:
+    from db_manager import DBManager
+    db = DBManager()
+except Exception as e:
+    print(f"[WARN] 数据库连接失败: {e}，将使用内存模式")
+    db = None
 
 # 后台刷新任务控制 (asyncio 版本，已弃用)
 _background_refresh_task = None
@@ -751,7 +756,6 @@ def get_login_html():
                 submitBtn.textContent = '登 录';
             }
         });
-        window.sendMessage = sendMessage;
     </script>
 </body>
 </html>'''
@@ -766,13 +770,13 @@ def get_admin_html():
     <title>Gemini API Admin</title>
     <style>
         *{box-sizing:border-box;margin:0;padding:0;}
-:root{
+        :root{
             --bg:#f8f9fa;
             --surface:#ffffff;
             --surface-2:#f1f3f4;
             --input-bg:#ffffff;
             --code-bg:#f8f9fa;
-            --border:#e0e3e7;
+            --border:#dadce0;
             --text:#202124;
             --muted:#5f6368;
             --blue:#1a73e8;
@@ -797,116 +801,159 @@ def get_admin_html():
             --shadow:0 1px 2px rgba(0,0,0,.2),0 2px 6px rgba(0,0,0,.3);
         }
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;overflow:hidden;}
-        ::-webkit-scrollbar{width:10px;height:10px;}
+        ::-webkit-scrollbar{width:8px;height:8px;}
         ::-webkit-scrollbar-track{background:var(--bg);}
-        ::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--border) 70%, var(--muted));border-radius:999px;border:2px solid var(--bg);}
+        ::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px;border:2px solid var(--bg);}
         ::-webkit-scrollbar-thumb:hover{background:var(--muted);}
-        .sidebar{width:248px;background:var(--surface);height:100vh;position:fixed;left:0;top:0;display:flex;flex-direction:column;border-right:1px solid var(--border);z-index:100;box-shadow:var(--shadow);transition:background .3s, border-color .3s;}
+        /* === Sidebar === */
+        .sidebar{width:248px;background:var(--surface);height:100vh;position:fixed;left:0;top:0;display:flex;flex-direction:column;border-right:1px solid var(--border);z-index:100;transition:background .3s,border-color .3s;}
         .sidebar-logo{padding:24px 20px;border-bottom:1px solid var(--border);font-size:20px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:10px;}
-        .sidebar-logo::before{content:'G';width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:800;background:linear-gradient(135deg,#4285f4 0 25%,#ea4335 25% 50%,#fbbc04 50% 75%,#34a853 75% 100%);}
-        .sidebar-nav{flex:1;padding:16px 8px;}
-        .nav-item{display:flex;align-items:center;padding:12px 14px;cursor:pointer;color:var(--muted);font-size:15px;transition:all .18s ease;border-radius:12px;margin:4px 6px;}
-        .nav-item:hover{color:var(--text);background:var(--surface-2);}
-        .nav-item.active{color:var(--blue);background:var(--surface-2);box-shadow:inset 0 0 0 1px rgba(26,115,232,.12);}
-        .nav-item span.icon{margin-right:12px;font-size:18px;}
-        .sidebar-footer{padding:16px 20px;border-top:1px solid var(--border);}
-        .sidebar-footer a{color:var(--muted);text-decoration:none;font-size:13px;display:flex;align-items:center;gap:6px;}
-        .sidebar-footer a:hover{color:var(--text);}
-        .main{margin-left:248px;flex:1;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);transition:background .3s;}
-        .tab-content{display:none;flex:1;flex-direction:column;min-height:0;background:var(--bg);}
-        .tab-content.active{display:flex;}
-        .chat-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface);backdrop-filter:saturate(180%) blur(8px);box-shadow:0 1px 0 rgba(60,64,67,.06);transition:background .3s, border-color .3s;}
-        .chat-header select{background:var(--surface);color:var(--text);border:1px solid var(--border);padding:9px 12px;border-radius:999px;font-size:14px;outline:none;cursor:pointer;box-shadow:var(--shadow);}
+        .sidebar-logo::before{content:'G';width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:18px;background:linear-gradient(135deg,#4285f4 0 25%,#ea4335 25% 50%,#fbbc04 50% 75%,#34a853 75% 100%);}
+        .sidebar-nav{flex:1;padding:12px 8px;}
+        .nav-item{display:flex;align-items:center;padding:12px 16px;cursor:pointer;color:var(--muted);font-size:14px;border-radius:0;margin:2px 0;transition:all .15s ease;border-radius:24px;position:relative;}
+        .nav-item::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:0;background:var(--blue);border-radius:0 2px 2px 0;transition:height .15s ease;}
+        .nav-item:hover{color:var(--text);background:rgba(0,0,0,0.04);[data-theme="dark"] &{background:rgba(255,255,255,0.08);}}
+        .nav-item.active{color:var(--blue);background:rgba(26,115,232,.08);[data-theme="dark"] &{background:rgba(138,180,248,.12);}}
+        .nav-item.active::before{height:20px;}
+        .nav-item span.icon{margin-right:16px;font-size:20px;opacity:.8;}
+        .sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);}
+        .sidebar-footer a{color:var(--muted);text-decoration:none;font-size:13px;display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:24px;transition:all .15s ease;margin:2px 0;}
+        .sidebar-footer a:hover{color:var(--text);background:rgba(0,0,0,0.04);[data-theme="dark"] &{background:rgba(255,255,255,0.08);}}
+        /* === Main === */
+        .main{margin-left:248px;flex:1;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);transition:margin-left .3s ease;}
+        .tab-content{display:none;flex:1;flex-direction:column;min-height:0;background:var(--bg);opacity:0;transform:translateY(8px);transition:opacity .25s ease,transform .25s ease;}
+        .tab-content.active{display:flex;opacity:1;transform:translateY(0);}
+        /* === Chat Header === */
+        .chat-header{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface);transition:background .3s,border-color .3s;}
+        .chat-header select{background:transparent;color:var(--text);border:none;padding:8px 12px 8px 8px;font-size:14px;font-weight:500;cursor:pointer;border-radius:8px;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235f6368' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;}
+        [data-theme="dark"] .chat-header select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239aa0a6' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");}
+        .chat-header select:hover{background-color:rgba(0,0,0,0.04);[data-theme="dark"] &{background-color:rgba(255,255,255,0.08);}}
         .chat-shell{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg);}
-        .chat-messages{flex:1;min-height:0;overflow-y:auto;padding:22px 20px 16px;display:flex;flex-direction:column;gap:14px;background:var(--bg);}
-        .msg{max-width:78%;padding:14px 16px;border-radius:18px;font-size:14px;line-height:1.7;position:relative;word-wrap:break-word;white-space:pre-wrap;box-shadow:var(--shadow);}
-        .msg .msg-time{font-size:11px;color:#9aa0a6;margin-top:6px;display:block;}
-        .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:6px;border:none;}
-        .msg.user .msg-time{color:rgba(255,255,255,.8);}
-        .msg.assistant{align-self:flex-start;background:var(--surface);color:var(--text);border-bottom-left-radius:6px;border:1px solid var(--border);}
-        .msg.assistant pre{background:var(--bg);padding:12px;border-radius:10px;overflow-x:auto;margin:8px 0;font-size:13px;border:1px solid var(--border);}
-        .msg.assistant code{font-family:'Cascadia Code',Consolas,monospace;font-size:13px;}
-        .msg.assistant code:not(pre code){background:var(--surface-2);padding:2px 6px;border-radius:4px;}
+        .chat-messages{flex:1;min-height:0;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px;}
+        .msg{max-width:75%;padding:12px 16px;border-radius:18px;font-size:14px;line-height:1.6;position:relative;word-wrap:break-word;white-space:pre-wrap;}
+        .msg .msg-time{font-size:11px;margin-top:6px;opacity:.7;display:block;}
+        .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:4px;}
+        .msg.user .msg-time{color:rgba(255,255,255,.7);}
+        .msg.assistant{align-self:flex-start;background:var(--surface);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:4px;}
+        .msg.assistant pre{background:var(--bg);padding:12px;border-radius:8px;overflow-x:auto;margin:8px 0;font-size:13px;border:1px solid var(--border);}
+        .msg.assistant code{font-family:'SF Mono',Consolas,monospace;font-size:13px;}
+        .msg.assistant code:not(pre code){background:var(--surface-2);padding:2px 5px;border-radius:4px;}
         .msg.assistant ul,.msg.assistant ol{padding-left:20px;margin:6px 0;}
         .msg.assistant li{margin:3px 0;}
         .msg.assistant strong{color:var(--blue);}
         .msg.assistant em{color:var(--green);}
-        .msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:16px 24px;color:var(--muted);font-size:14px;}
-        .msg.thinking::before{content:'';display:inline-block;width:18px;height:18px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin 1s linear infinite;}
+        .msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:20px;color:var(--muted);font-size:14px;}
+        .msg.thinking::before{content:'';display:inline-block;width:20px;height:20px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin .8s linear infinite;}
         @keyframes spin{to{transform:rotate(360deg);}}
-        @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.58;}}
-        .chat-input-area{padding:14px 20px 18px;border-top:1px solid var(--border);background:var(--surface);backdrop-filter:saturate(180%) blur(10px);position:sticky;bottom:0;z-index:20;box-shadow:0 -1px 0 rgba(60,64,67,.05);transition:background .3s, border-color .3s;}
-        .chat-input-wrap{display:flex;align-items:flex-end;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:18px;padding:10px 12px;box-shadow:var(--shadow);}
-        .chat-input-wrap:focus-within{border-color:#aecbfa;box-shadow:0 0 0 3px rgba(26,115,232,.12),var(--shadow);}
-        .attach-btn{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px;display:flex;align-items:center;}
-        .attach-btn:hover{color:var(--blue);}
-        #chatInput{flex:1;background:transparent;border:none;color:var(--text);font-size:14px;resize:none;outline:none;max-height:140px;min-height:24px;line-height:1.6;font-family:inherit;}
-        .send-btn{background:linear-gradient(135deg,#1a73e8,#4285f4);border:none;color:#fff;width:40px;height:40px;border-radius:12px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 6px 16px rgba(26,115,232,.22);}
-        .send-btn:hover{filter:brightness(1.03);}
-        .send-btn:disabled{opacity:.42;cursor:not-allowed;box-shadow:none;}
+        /* === Chat Input === */
+        .chat-input-area{padding:12px 20px;border-top:1px solid var(--border);background:var(--surface);transition:background .3s,border-color .3s;}
+        .chat-input-wrap{display:flex;align-items:flex-end;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:24px;padding:8px 12px;}
+        .chat-input-wrap:focus-within{border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,115,232,.2);}
+        .attach-btn{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:6px;border-radius:50%;transition:all .15s;}
+        .attach-btn:hover{color:var(--blue);background:rgba(26,115,232,.08);}
+        #chatInput{flex:1;background:transparent;border:none;color:var(--text);font-size:14px;resize:none;outline:none;max-height:120px;min-height:24px;line-height:1.5;font-family:inherit;}
+        .send-btn{background:var(--blue);border:none;color:#fff;width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s;}
+        .send-btn:hover{background:#1557b0;transform:scale(1.05);}
+        .send-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;}
         .img-preview-area{display:flex;gap:8px;padding:0 0 8px 0;flex-wrap:wrap;}
-        .img-preview-item{position:relative;width:64px;height:64px;border-radius:12px;overflow:hidden;border:1px solid var(--border);box-shadow:var(--shadow);background:var(--surface);}
+        .img-preview-item{position:relative;width:56px;height:56px;border-radius:12px;overflow:hidden;border:1px solid var(--border);background:var(--surface);}
         .img-preview-item img{width:100%;height:100%;object-fit:cover;}
-        .img-preview-item .remove-img{position:absolute;top:4px;right:4px;background:rgba(234,67,53,.95);color:#fff;border:none;width:20px;height:20px;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;}
-        .console-wrap{flex:1;overflow-y:auto;padding:22px;}
-        .console-toolbar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px;}
-        .console-action{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:999px;font-size:13px;cursor:pointer;box-shadow:var(--shadow);}
-        .console-action:hover{border-color:var(--border);background:var(--surface-2);}
+        .img-preview-item .remove-img{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.6);color:#fff;border:none;width:18px;height:18px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+        /* === Console === */
+        .console-wrap{flex:1;overflow-y:auto;padding:20px;}
+        .console-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;}
+        .console-action{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:20px;font-size:13px;cursor:pointer;font-weight:500;transition:all .15s ease;}
+        .console-action:hover{border-color:var(--blue);color:var(--blue);background:rgba(26,115,232,.04);}
         .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px;}
         .stats-grid-2{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;}
-        .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;text-align:left;box-shadow:var(--shadow);}
-        .stat-card .label{font-size:12px;color:var(--muted);margin-bottom:10px;letter-spacing:.2px;}
-        .stat-card .value{font-size:28px;font-weight:700;color:var(--text);}
-        .stat-card .sub{margin-top:8px;font-size:12px;color:var(--muted);}
-        .console-section{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:var(--shadow);}
-        .console-section h3{font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text);display:flex;align-items:center;gap:8px;}
+        .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px;}
+        .stat-card .label{font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;}
+        .stat-card .value{font-size:26px;font-weight:500;color:var(--text);}
+        .stat-card .sub{margin-top:6px;font-size:12px;color:var(--muted);}
+        .console-section{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:20px;}
+        .console-section h3{font-size:15px;font-weight:600;margin-bottom:16px;color:var(--text);}
         .metric-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
-        .metric-row{background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:14px;display:flex;justify-content:space-between;gap:12px;align-items:center;}
-        .metric-row .k{font-size:12px;color:var(--muted);}
-        .metric-row .v{font-size:13px;color:var(--text);font-weight:600;text-align:right;word-break:break-all;}
-        .model-bar{display:flex;align-items:center;gap:10px;margin:10px 0;}
-        .model-bar .name{width:220px;font-size:13px;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .model-bar .bar-bg{flex:1;height:24px;background:var(--surface-2);border-radius:999px;overflow:hidden;border:1px solid var(--border);}
-        .model-bar .bar-fill{height:100%;background:linear-gradient(90deg,#4285f4,#34a853);border-radius:999px;transition:width .35s;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:11px;color:#fff;min-width:30px;}
-        .api-key-display{font-family:monospace;font-size:14px;background:var(--surface-2);padding:12px 14px;border-radius:12px;border:1px solid var(--border);color:var(--blue);word-break:break-all;}
-        .base-url-display{font-family:monospace;font-size:14px;background:var(--surface-2);padding:12px 14px;border-radius:12px;border:1px solid var(--border);color:var(--green);margin-top:10px;word-break:break-all;}
-        .model-tag{display:inline-block;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 14px;border-radius:999px;font-size:13px;margin:4px;box-shadow:0 1px 0 rgba(60,64,67,.03);}
-        .rust-code{background:var(--code-bg);border:1px solid var(--border);border-radius:14px;padding:16px;font-family:'Cascadia Code',Consolas,monospace;font-size:12px;color:var(--text);overflow-x:auto;white-space:pre;line-height:1.6;max-height:520px;overflow-y:auto;}
-        .config-wrap{flex:1;overflow-y:auto;padding:22px;}
-        .config-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:24px;max-width:920px;margin:0 auto;box-shadow:var(--shadow);}
-        .config-card .section{margin-bottom:25px;}
-        .config-card .section-title{font-size:16px;font-weight:600;color:var(--text);margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid var(--border);}
-        .config-card .form-group{margin-bottom:15px;}
-        .config-card label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:5px;}
-        .config-card input,.config-card textarea{width:100%;padding:12px 15px;border:1px solid var(--border);border-radius:12px;font-size:14px;font-family:monospace;background:var(--input-bg);color:var(--text);transition:border-color .2s,box-shadow .2s;}
-        .config-card input:focus,.config-card textarea:focus{outline:none;border-color:#aecbfa;box-shadow:0 0 0 3px rgba(26,115,232,.12);}
+        .metric-row{background:var(--surface-2);border-radius:12px;padding:12px 16px;display:flex;justify-content:space-between;gap:12px;align-items:center;}
+        .metric-row .k{font-size:13px;color:var(--muted);}
+        .metric-row .v{font-size:13px;color:var(--text);font-weight:500;text-align:right;word-break:break-all;}
+        .model-bar{display:flex;align-items:center;gap:12px;margin:8px 0;}
+        .model-bar .name{width:180px;font-size:13px;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .model-bar .bar-bg{flex:1;height:20px;background:var(--surface-2);border-radius:10px;overflow:hidden;}
+        .model-bar .bar-fill{height:100%;background:var(--blue);border-radius:10px;transition:width .3s ease;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:11px;color:#fff;min-width:24px;}
+        .api-key-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--blue);word-break:break-all;}
+        .base-url-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--green);margin-top:8px;word-break:break-all;}
+        .model-tag{display:inline-block;background:var(--surface-2);color:var(--text);padding:6px 14px;border-radius:16px;font-size:12px;margin:4px;font-weight:500;}
+        .rust-code{background:var(--code-bg);border:1px solid var(--border);border-radius:12px;padding:14px;font-family:'SF Mono',Consolas,monospace;font-size:12px;color:var(--text);overflow-x:auto;white-space:pre;line-height:1.5;max-height:400px;overflow-y:auto;}
+        /* === API Key Management === */
+        .api-key-list{margin-top:12px;}
+        .api-key-item{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--surface-2);border-radius:12px;margin-bottom:8px;}
+        .api-key-item .key-info{flex:1;}
+        .api-key-item .key-value{font-family:'SF Mono',monospace;font-size:13px;color:var(--text);}
+        .api-key-item .key-note{font-size:12px;color:var(--muted);margin-top:4px;}
+        .api-key-item .key-status{font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px;}
+        .api-key-item .key-status.active{background:#e6f4ea;color:#137333;}
+        .api-key-item .key-status.inactive{background:#fce8e6;color:#c5221f;}
+        .api-key-item .key-actions{display:flex;gap:8px;}
+        .api-key-item .key-btn{padding:6px 12px;border-radius:16px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text);transition:all .15s;}
+        .api-key-item .key-btn:hover{border-color:var(--blue);color:var(--blue);}
+        .api-key-item .key-btn.delete{border-color:var(--red);color:var(--red);}
+        .api-key-item .key-btn.delete:hover{background:var(--red);color:#fff;}
+        .create-key-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 20px;border:2px dashed var(--border);border-radius:12px;background:none;width:100%;cursor:pointer;color:var(--muted);font-size:14px;transition:all .15s;}
+        .create-key-btn:hover{border-color:var(--blue);color:var(--blue);background:rgba(26,115,232,.04);}
+        /* === Config === */
+        .config-wrap{flex:1;overflow-y:auto;padding:20px;}
+        .config-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;max-width:900px;margin:0 auto;}
+        .config-card .section{margin-bottom:28px;}
+        .config-card .section-title{font-size:15px;font-weight:600;color:var(--text);margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border);}
+        .config-card .form-group{margin-bottom:16px;}
+        .config-card label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px;}
+        .config-card input,.config-card textarea{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;font-size:14px;font-family:inherit;background:var(--input-bg);color:var(--text);transition:border-color .2s,box-shadow .2s;}
+        .config-card input:focus,.config-card textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,115,232,.2);}
         .config-card textarea{resize:vertical;min-height:80px;}
-        .config-card .info-box{background:var(--surface-2);border-radius:14px;padding:15px;margin-bottom:20px;font-size:13px;color:var(--muted);border:1px solid var(--border);}
+        .config-card .info-box{background:var(--surface-2);border-radius:12px;padding:14px;margin-bottom:20px;font-size:13px;color:var(--muted);}
         .config-card .info-box code{background:var(--surface);padding:2px 6px;border-radius:4px;color:var(--blue);}
-        .config-card .info-box a{color:#1a73e8;}
+        .config-card .info-box a{color:var(--blue);}
         .config-card .required{color:var(--red);}
         .config-card .optional{color:var(--muted);font-size:12px;}
-        .config-card .parsed-info{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:15px;margin-top:15px;font-size:12px;display:none;}
-        .config-card .parsed-info h4{color:var(--green);margin-bottom:10px;}
-        .config-card .parsed-info .item{margin:5px 0;color:var(--muted);}
-        .config-card .parsed-info .item span{color:#0b8043;font-family:monospace;}
-        .btn-primary{background:linear-gradient(135deg,#1a73e8,#4285f4);color:#fff;border:none;padding:14px 30px;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;width:100%;margin-top:20px;transition:transform .2s,box-shadow .2s;box-shadow:0 6px 16px rgba(26,115,232,.18);}
-        .btn-primary:hover{transform:translateY(-1px);box-shadow:0 10px 22px rgba(26,115,232,.22);}
-        .btn-primary:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none;}
-        .status-msg{margin-top:20px;padding:15px;border-radius:12px;font-size:14px;display:none;}
-        .status-msg.success{background:#f6fbf7;border:1px solid #d7f0dd;color:#0b8043;display:block;}
-        .status-msg.error{background:#fce8e6;border:1px solid #f7c6c2;color:#c5221f;display:block;}
-        .token-badge{font-size:12px;padding:6px 12px;border-radius:999px;font-weight:600;}
+        .config-card .parsed-info{background:var(--surface-2);border-radius:12px;padding:14px;margin-top:14px;font-size:12px;display:none;}
+        .config-card .parsed-info h4{color:var(--green);margin-bottom:8px;}
+        .config-card .parsed-info .item{margin:4px 0;color:var(--muted);}
+        .config-card .parsed-info .item span{color:var(--green);font-family:'SF Mono',monospace;}
+        .btn-primary{background:var(--blue);color:#fff;border:none;padding:12px 24px;border-radius:24px;font-size:14px;font-weight:500;cursor:pointer;width:100%;margin-top:20px;transition:all .2s ease;}
+        .btn-primary:hover{background:#1557b0;box-shadow:0 4px 12px rgba(26,115,232,.3);}
+        .btn-primary:disabled{opacity:.6;cursor:not-allowed;}
+        .status-msg{margin-top:16px;padding:14px;border-radius:12px;font-size:14px;display:none;}
+        .status-msg.success{background:#e6f4ea;border:1px solid #c7e4c9;color:#137333;display:block;}
+        .status-msg.error{background:#fce8e6;border:1px solid #f2b8b0;color:#c5221f;display:block;}
+        .token-badge{font-size:12px;padding:6px 14px;border-radius:16px;font-weight:500;}
         .token-badge.valid{background:#e6f4ea;color:#137333;}
         .token-badge.invalid{background:#fce8e6;color:#c5221f;}
         .token-badge.loading{background:#fef7e0;color:#b06000;}
+        /* === Animations === */
+        @keyframes fadeIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+        .tab-content.active{animation:fadeIn .3s ease forwards;}
+        /* === Responsive === */
         @media(max-width:1100px){
             .stats-grid,.stats-grid-2{grid-template-columns:repeat(2,1fr);}
             .metric-list{grid-template-columns:1fr;}
         }
         @media(max-width:900px){
-            .sidebar{width:72px;}.sidebar-logo{padding:16px 10px;font-size:0;text-align:center;justify-content:center;}.sidebar-logo::after{content:'';}.nav-item{padding:12px 10px;justify-content:center;}.nav-item span.label{display:none;}.nav-item span.icon{margin-right:0;}.sidebar-footer{padding:10px;text-align:center;}.sidebar-footer a span{display:none;}.main{margin-left:72px;}.chat-header,.chat-messages,.chat-input-area,.console-wrap,.config-wrap{padding-left:14px;padding-right:14px;}.stats-grid,.stats-grid-2{grid-template-columns:1fr;}.model-bar .name{width:120px;}
+            .sidebar{width:64px;}
+            .sidebar-logo{padding:16px 0;justify-content:center;font-size:0;}
+            .sidebar-logo::before{width:28px;height:28px;font-size:14px;}
+            .nav-item{padding:12px 0;justify-content:center;}
+            .nav-item span.label,.sidebar-logo span{display:none;}
+            .nav-item span.icon{margin-right:0;font-size:20px;}
+            .sidebar-footer{padding:8px;}
+            .sidebar-footer a{padding:10px 0;justify-content:center;}
+            .sidebar-footer a span{display:none;}
+            .main{margin-left:64px;}
+            .chat-header,.chat-messages,.chat-input-area,.console-wrap,.config-wrap{padding:12px;}
+            .stats-grid,.stats-grid-2{grid-template-columns:1fr;}
+            .model-bar .name{width:100px;}
         }
+    </style>
+</head>
     </style>
 </head>
 <body>
@@ -947,40 +994,43 @@ def get_admin_html():
         <div id="tab-console" class="tab-content">
             <div class="console-wrap">
                 <div class="console-toolbar">
-                    <button class="console-action" onclick="refreshConsoleData()">刷新数据</button>
-                    <button class="console-action" onclick="refreshTokenNow()">刷新 Token</button>
-                    <button class="console-action" onclick="resetClientNow()">重置 Client</button>
-                    <button class="console-action" onclick="exportConsoleData()">导出统计</button>
-                    <button class="console-action" onclick="clearChatHistory()">清空对话</button>
+                    <button class="console-action" onclick="refreshConsoleData()">&#128260; 刷新数据</button>
+                    <button class="console-action" onclick="refreshTokenNow()">&#128259; 刷新 Token</button>
+                    <button class="console-action" onclick="resetClientNow()">&#128260; 重置 Client</button>
+                    <button class="console-action" onclick="exportConsoleData()">&#128229; 导出统计</button>
+                    <button class="console-action" onclick="clearChatHistory()">&#128465; 清空对话</button>
                 </div>
                 <div class="stats-grid" id="statsGrid">
-                    <div class="stat-card"><div class="label">总请求数</div><div class="value" id="statReqs">-</div></div>
-                    <div class="stat-card"><div class="label">总 Token 用量</div><div class="value" id="statTokens">-</div></div>
+                    <div class="stat-card"><div class="label">总请求数</div><div class="value" id="statReqs">-</div><div class="sub">今日 <span id="statTodayReqs">0</span></div></div>
+                    <div class="stat-card"><div class="label">总 Token</div><div class="value" id="statTokens">-</div><div class="sub">今日 <span id="statTodayTokens">0</span></div></div>
                     <div class="stat-card"><div class="label">Prompt Tokens</div><div class="value" id="statPrompt">-</div></div>
-                    <div class="stat-card"><div class="label">Completion Tokens</div><div class="value" id="statCompletion">-</div></div>
+                    <div class="stat-card"><div class="label">Completion</div><div class="value" id="statCompletion">-</div></div>
                 </div>
                 <div class="stats-grid-2">
-                    <div class="stat-card"><div class="label">运行时间</div><div class="value" id="statUptime" style="font-size:20px;">-</div></div>
-                    <div class="stat-card"><div class="label">Token 刷新次数</div><div class="value" id="statRefresh">-</div></div>
-                    <div class="stat-card"><div class="label">后台刷新</div><div class="value" id="statBackground" style="font-size:20px;">-</div></div>
-                    <div class="stat-card"><div class="label">Client 状态</div><div class="value" id="statClient" style="font-size:20px;">-</div></div>
+                    <div class="stat-card"><div class="label">运行时间</div><div class="value" id="statUptime" style="font-size:18px;">-</div></div>
+                    <div class="stat-card"><div class="label">刷新次数</div><div class="value" id="statRefresh">-</div></div>
+                    <div class="stat-card"><div class="label">后台刷新</div><div class="value" id="statBackground" style="font-size:18px;">-</div></div>
+                    <div class="stat-card"><div class="label">Client</div><div class="value" id="statClient" style="font-size:18px;">-</div></div>
                 </div>
                 <div class="console-section">
-                    <h3>&#128202; 模型使用统计</h3>
-                    <div id="modelUsageChart"><span style="color:#666;">暂无数据</span></div>
+                    <h3>&#128202; 模型使用分布</h3>
+                    <div id="modelUsageChart"><span style="color:var(--muted);">暂无数据</span></div>
                 </div>
                 <div class="console-section">
-                    <h3>&#128273; API Keys 信息</h3>
-                    <div class="metric-list">
-                        <div class="metric-row"><div class="k">API Key</div><div class="v" id="dispApiKey"></div></div>
-                        <div class="metric-row"><div class="k">Base URL</div><div class="v" id="dispBaseUrl"></div></div>
-                        <div class="metric-row"><div class="k">接口路径</div><div class="v">/v1/chat/completions</div></div>
-                        <div class="metric-row"><div class="k">模型接口</div><div class="v">/v1/models</div></div>
+                    <h3>&#128273; 我的 API Keys</h3>
+                    <div style="margin-bottom:12px;">
+                        <div class="metric-row"><div class="k">接口地址</div><div class="v" id="dispBaseUrl"></div></div>
                     </div>
+                    <div id="apiKeysList" class="api-key-list">
+                        <span style="color:var(--muted);font-size:13px;">加载中...</span>
+                    </div>
+                    <button class="create-key-btn" onclick="showCreateKeyModal()" style="margin-top:12px;">
+                        &#43; 创建新的 API Key
+                    </button>
                 </div>
                 <div class="console-section">
-                    <h3>&#128640; 可用模型列表</h3>
-                    <div id="modelsList" style="margin-top:8px;"><span style="color:#666;">加载中...</span></div>
+                    <h3>&#128640; 可用模型</h3>
+                    <div id="modelsList" style="margin-top:8px;"><span style="color:var(--muted);">加载中...</span></div>
                 </div>
                 <div class="console-section">
                     <h3>&#129408; Rust 对接文档</h3>
@@ -1418,12 +1468,21 @@ def get_admin_html():
             document.getElementById('statBgRefresh').textContent = s.background_refresh_enabled ? '开启' : '关闭';
             document.getElementById('statUpdatedAt').textContent = new Date().toLocaleString();
 
+            if (s.today_requests !== undefined) {
+                var todayReqs = document.getElementById('statTodayReqs');
+                if (todayReqs) todayReqs.textContent = s.today_requests;
+            }
+            if (s.today_tokens !== undefined) {
+                var todayTks = document.getElementById('statTodayTokens');
+                if (todayTks) todayTks.textContent = s.today_tokens;
+            }
+
             // Model usage chart
             var chart = document.getElementById('modelUsageChart');
             var models = s.requests_by_model || {};
             var keys = Object.keys(models);
             if (keys.length === 0) {
-                chart.innerHTML = '<span style="color:#666;">暂无请求数据</span>';
+                chart.innerHTML = '<span style="color:var(--muted);font-size:13px;">暂无请求数据</span>';
             } else {
                 var maxVal = Math.max.apply(null, keys.map(function(k){return models[k];}));
                 chart.innerHTML = '';
@@ -1439,10 +1498,11 @@ def get_admin_html():
             }
         } catch(e) { console.error('Stats error:', e); }
 
-        // API Key & URL
-        var masked = API_KEY.substring(0,6) + '****' + API_KEY.substring(API_KEY.length-4);
-        document.getElementById('dispApiKey').textContent = masked;
+        // Base URL
         document.getElementById('dispBaseUrl').textContent = BASE_URL + '/v1';
+
+        // Load API Keys
+        loadApiKeys();
 
         // Models list
         try {
@@ -1465,6 +1525,89 @@ def get_admin_html():
         // Auto refresh
         if (consoleTimer) clearInterval(consoleTimer);
         consoleTimer = setInterval(loadConsoleData, 10000);
+    }
+
+    // ===== API Key Management =====
+    async function loadApiKeys() {
+        try {
+            var resp = await fetch('/admin/api-keys', {credentials:'same-origin'});
+            var keys = await resp.json();
+            var container = document.getElementById('apiKeysList');
+            if (!container) return;
+            
+            if (keys.length === 0) {
+                container.innerHTML = '<span style="color:var(--muted);font-size:13px;">暂无 API Key</span>';
+                return;
+            }
+            
+            container.innerHTML = '';
+            keys.forEach(function(k) {
+                var item = document.createElement('div');
+                item.className = 'api-key-item';
+                var statusText = k.is_active ? '已启用' : '已禁用';
+                var statusClass = k.is_active ? 'active' : 'inactive';
+                item.innerHTML = '<div class="key-info"><div class="key-value">' + k.api_key + '</div>' +
+                    '<div class="key-note">' + (k.note || '无备注') + ' | ' + k.created_at.substring(0,10) + '</div></div>' +
+                    '<span class="key-status ' + statusClass + '">' + statusText + '</span>' +
+                    '<div class="key-actions">' +
+                    '<button class="key-btn" onclick="toggleApiKey(' + k.id + ')">' + (k.is_active ? '禁用' : '启用') + '</button>' +
+                    '<button class="key-btn delete" onclick="deleteApiKey(' + k.id + ')">删除</button>' +
+                    '</div>';
+                container.appendChild(item);
+            });
+        } catch(e) { console.error('Load API keys error:', e); }
+    }
+
+    async function showCreateKeyModal() {
+        var note = prompt('请输入备注（可选）:', '');
+        if (note === null) return;
+        try {
+            var resp = await fetch('/admin/api-keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'same-origin',
+                body: JSON.stringify({note: note || ''})
+            });
+            var result = await resp.json();
+            if (result.success && result.data) {
+                var key = result.data.api_key;
+                var fullKey = prompt('API Key 创建成功！请保存以下 Key: (关闭后无法再次查看)', key);
+                loadApiKeys();
+            } else {
+                alert('创建失败: ' + (result.message || '未知错误'));
+            }
+        } catch(e) { alert('创建失败: ' + e.message); }
+    }
+
+    async function toggleApiKey(keyId) {
+        try {
+            var resp = await fetch('/admin/api-keys/' + keyId + '/toggle', {
+                method: 'POST',
+                credentials: 'same-origin'
+            });
+            var result = await resp.json();
+            if (result.success) {
+                loadApiKeys();
+            } else {
+                alert('操作失败: ' + result.message);
+            }
+        } catch(e) { alert('操作失败: ' + e.message); }
+    }
+
+    async function deleteApiKey(keyId) {
+        if (!confirm('确定要删除这个 API Key 吗？此操作不可恢复。')) return;
+        try {
+            var resp = await fetch('/admin/api-keys/' + keyId, {
+                method: 'DELETE',
+                credentials: 'same-origin'
+            });
+            var result = await resp.json();
+            if (result.success) {
+                loadApiKeys();
+            } else {
+                alert('删除失败: ' + result.message);
+            }
+        } catch(e) { alert('删除失败: ' + e.message); }
     }
 
     // ===== Config =====
@@ -1657,6 +1800,11 @@ def get_admin_html():
     loadModels();
     updateTokenBadge();
     setInterval(updateTokenBadge, 30000);
+
+    // Expose functions to global scope for onclick handlers
+    window.switchTab = switchTab;
+    window.toggleTheme = toggleTheme;
+    window.sendMessage = sendMessage;
     </script>
 </body>
 </html>'''
@@ -1674,11 +1822,12 @@ async def admin_login(request: Request):
     password = data.get("password", "")
     
     # 使用 PostgreSQL 数据库验证账号密码
-    if db.authenticate_user(username, password):
+    if db and db.authenticate_user(username, password):
         token = generate_session_token()
         _admin_sessions.add(token)
         response = JSONResponse({"success": True, "message": "登录成功"})
         response.set_cookie(key="admin_session", value=token, httponly=True, max_age=86400)
+        response.set_cookie(key="admin_username", value=username, httponly=False, max_age=86400)
         return response
     else:
         return {"success": False, "message": "用户名或密码错误"}
@@ -1780,6 +1929,138 @@ async def admin_get_config(request: Request):
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
     return _config
+
+
+@app.get("/admin/stats")
+async def admin_get_stats(request: Request):
+    """获取全局统计数据"""
+    if not verify_admin_session(request):
+        return {"error": "未登录"}, 401
+    
+    # 优先从数据库获取，如果没有则用内存
+    if db:
+        try:
+            stats = db.get_global_stats()
+        except Exception:
+            stats = {"total_requests": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_tokens": 0, "requests_by_model": {}, "today_requests": 0, "today_tokens": 0, "recent_24h_requests": 0, "total_errors": 0}
+    else:
+        stats = {"total_requests": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_tokens": 0, "requests_by_model": {}, "today_requests": 0, "today_tokens": 0, "recent_24h_requests": 0, "total_errors": 0}
+    
+    current_time = time.time()
+    uptime_seconds = int(current_time - _stats["start_time"])
+    uptime_hours = uptime_seconds // 3600
+    uptime_mins = (uptime_seconds % 3600) // 60
+    
+    return {
+        "total_requests": stats["total_requests"],
+        "total_prompt_tokens": stats["total_prompt_tokens"],
+        "total_completion_tokens": stats["total_completion_tokens"],
+        "total_tokens": stats["total_tokens"],
+        "requests_by_model": stats["requests_by_model"],
+        "uptime": f"{uptime_hours}小时{uptime_mins}分钟",
+        "token_refresh_count": _token_refresh_count,
+        "background_refresh_enabled": TOKEN_BACKGROUND_REFRESH,
+        "client_active": _client is not None,
+        "auto_refresh_enabled": TOKEN_AUTO_REFRESH,
+        "today_requests": stats["today_requests"],
+        "today_tokens": stats["today_tokens"],
+        "recent_24h_requests": stats["recent_24h_requests"],
+        "total_errors": stats["total_errors"],
+    }
+
+
+@app.post("/admin/api-keys")
+async def admin_create_api_key(request: Request):
+    """创建新的API Key"""
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+    
+    data = await request.json()
+    username = request.cookies.get("admin_username", "")
+    
+    if not username:
+        return {"success": False, "message": "无法获取用户信息"}
+    
+    user_id = db.get_user_id(username)
+    if not user_id:
+        return {"success": False, "message": "用户不存在"}
+    
+    note = data.get("note", "")
+    result = db.create_api_key(user_id, note)
+    
+    if result:
+        return {"success": True, "data": result}
+    return {"success": False, "message": "创建失败"}
+
+
+@app.get("/admin/api-keys")
+async def admin_list_api_keys(request: Request):
+    """列出用户的所有API Key"""
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    
+    if not db:
+        return []
+    
+    username = request.cookies.get("admin_username", "")
+    if not username:
+        return []
+    
+    user_id = db.get_user_id(username)
+    if not user_id:
+        return []
+    
+    keys = db.list_api_keys(user_id)
+    for k in keys:
+        k["api_key"] = k["api_key"][:10] + "****" + k["api_key"][-4:]
+    return keys
+
+
+@app.delete("/admin/api-keys/{key_id}")
+async def admin_delete_api_key(key_id: int, request: Request):
+    """删除API Key"""
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+    
+    username = request.cookies.get("admin_username", "")
+    if not username:
+        return {"success": False, "message": "无法获取用户信息"}
+    
+    user_id = db.get_user_id(username)
+    if not user_id:
+        return {"success": False, "message": "用户不存在"}
+    
+    success = db.delete_api_key(user_id, key_id)
+    return {"success": success}
+
+
+@app.post("/admin/api-keys/{key_id}/toggle")
+async def admin_toggle_api_key(key_id: int, request: Request):
+    """启用/禁用API Key"""
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+    
+    username = request.cookies.get("admin_username", "")
+    if not username:
+        return {"success": False, "message": "无法获取用户信息"}
+    
+    user_id = db.get_user_id(username)
+    if not user_id:
+        return {"success": False, "message": "用户不存在"}
+    
+    is_active = db.toggle_api_key(user_id, key_id)
+    if is_active is not None:
+        return {"success": True, "is_active": is_active}
+    return {"success": False, "message": "操作失败"}
 
 
 # ============ API 路由 ============
@@ -1893,12 +2174,32 @@ class ChatCompletionToolCall(BaseModel):
     function: ChatCompletionToolFunction
 
 
-def verify_api_key(authorization: str = Header(None)):
-    if not API_KEY:
-        return True
-    if not authorization or not authorization.startswith("Bearer ") or authorization[7:] != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return True
+def verify_api_key(authorization: str = Header(None), db_manager=None):
+    """
+    验证API Key
+    1. 如果配置了ALLOW_DB_API_KEYS则优先查询数据库
+    2. 否则使用配置文件中的单key
+    返回 (user_id, key_id) 用于统计
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    
+    token = authorization[7:]
+    
+    # 优先检查数据库（如果可用）
+    if ALLOW_DB_API_KEYS and db_manager:
+        try:
+            result = db_manager.verify_api_key_db(token)
+            if result:
+                return {"user_id": result["user_id"], "key_id": result["key_id"]}
+        except Exception:
+            pass  # 数据库不可用时跳过
+    
+    # 兼容旧版单key
+    if API_KEY and token == API_KEY:
+        return {"user_id": 0, "key_id": 0}
+    
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 @app.get("/")
@@ -1908,7 +2209,7 @@ async def root():
 
 @app.get("/v1/models")
 async def list_models(authorization: str = Header(None)):
-    verify_api_key(authorization)
+    verify_api_key(authorization, db)
     models = _config.get("MODELS", DEFAULT_MODELS)
     created = int(time.time())
     return {
@@ -1920,7 +2221,7 @@ async def list_models(authorization: str = Header(None)):
 @app.post("/v1/token/refresh")
 async def refresh_token_api(authorization: str = Header(None)):
     """手动刷新 token API"""
-    verify_api_key(authorization)
+    verify_api_key(authorization, db)
     result = try_refresh_tokens(force=True)
     return {
         "success": result["success"],
@@ -1934,7 +2235,7 @@ async def refresh_token_api(authorization: str = Header(None)):
 @app.get("/v1/token/status")
 async def token_status_api(authorization: str = Header(None)):
     """查看 token 状态 API"""
-    verify_api_key(authorization)
+    verify_api_key(authorization, db)
     current_time = time.time()
     time_since_refresh = int(current_time - _last_token_refresh) if _last_token_refresh > 0 else -1
     
@@ -1953,7 +2254,7 @@ async def token_status_api(authorization: str = Header(None)):
 @app.post("/v1/client/reset")
 async def reset_client_api(authorization: str = Header(None)):
     """重置 client API，用于 token 更新后强制重新创建 client"""
-    verify_api_key(authorization)
+    verify_api_key(authorization, db)
     reset_client()
     return {"success": True, "message": "Client 已重置，下次请求将使用新配置"}
 
@@ -2037,7 +2338,11 @@ def is_continuation(current_messages: list, last_hash: str) -> bool:
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, authorization: str = Header(None)):
     global _last_user_messages_hash
-    verify_api_key(authorization)
+    
+    # 验证API Key并获取user_id, key_id用于统计
+    auth_result = verify_api_key(authorization, db)
+    user_id = auth_result.get("user_id", 0)
+    key_id = auth_result.get("key_id", 0)
     
     # 记录请求入参 (图片内容截断显示)
     request_log = {
@@ -2220,6 +2525,11 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             _stats["total_completion_tokens"] += response.usage.completion_tokens
             _stats["total_tokens"] += response.usage.total_tokens
             _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
+            
+            try:
+                db.record_usage(user_id, key_id, request.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+            except Exception:
+                pass
 
             return StreamingResponse(
                 generate_stream(),
@@ -2249,12 +2559,18 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         
         log_api_call(request_log, response_data.model_dump())
 
-        # 更新统计
+        # 更新内存统计
         _stats["total_requests"] += 1
         _stats["total_prompt_tokens"] += response.usage.prompt_tokens
         _stats["total_completion_tokens"] += response.usage.completion_tokens
         _stats["total_tokens"] += response.usage.total_tokens
         _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
+        
+        # 更新数据库统计
+        try:
+            db.record_usage(user_id, key_id, request.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+        except Exception:
+            pass
         
         return JSONResponse(
             content=response_data.model_dump(),
@@ -2289,12 +2605,16 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         print(f"[ERROR] Chat error: {error_msg}")
         traceback.print_exc()
         log_api_call(request_log, None, error=error_msg)
+        try:
+            db.record_error(user_id, key_id, request.model, error_msg)
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post("/v1/chat/completions/reset")
 async def reset_context(authorization: str = Header(None)):
-    verify_api_key(authorization)
+    verify_api_key(authorization, db)
     global _client
     if _client:
         _client.reset()
