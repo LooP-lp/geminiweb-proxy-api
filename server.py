@@ -1023,7 +1023,7 @@ def get_admin_html():
         <div id="tab-chat" class="tab-content active">
             <div class="chat-shell">
                 <div class="chat-header">
-                    <span style="font-weight:600;">&#128172; 对话</span>
+                    <span style="font-weight:600;">&#128172; <span id="greetingText">对话</span></span>
                     <select id="modelSelect"></select>
                     <span id="tokenBadge" class="token-badge loading">检查中...</span>
                 </div>
@@ -1925,6 +1925,18 @@ def get_admin_html():
     });
 
     // ===== Init =====
+    var currentUser = document.cookie.replace(/(?:^|;) *admin_username=([^;]*)(?:;|$)/, '$1') || '用户';
+    function getGreeting() {
+        var h = new Date().getHours();
+        if (h < 6) return '夜深了';
+        if (h < 12) return '早上好';
+        if (h < 14) return '中午好';
+        if (h < 18) return '下午好';
+        return '晚上好';
+    }
+    var greetingEl = document.getElementById('greetingText');
+    if (greetingEl) greetingEl.textContent = getGreeting() + '，' + currentUser;
+    
     loadModels();
     updateTokenBadge();
     setInterval(updateTokenBadge, 30000);
