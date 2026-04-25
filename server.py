@@ -2536,8 +2536,12 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
     try:
         client = get_client()
         
-        # 不自动 reset，由 client.py 根据 conversation_id 决定发送策略
-        # 这样增量模式才能生效
+        # 恢复会话检测：新消息/新会话时自动重置
+        current_hash = get_user_messages_hash(request.messages)
+        if not is_continuation(request.messages, _last_user_messages_hash):
+            print(f"[INFO] 检测到新会话，重置上下文")
+            client.reset()
+        _last_user_messages_hash = current_hash
         
         # 处理消息
         messages = []
