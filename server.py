@@ -2440,39 +2440,27 @@ def is_continuation(current_messages: list, last_hash: str) -> bool:
     """
     判断当前请求是否是上一次对话的延续
     
-    逻辑：如果当前消息去掉最后一条用户消息后的 hash 等于上次的 hash，
-    说明是同一对话的延续
+    逻辑：只检测最后一条用户消息的 hash 是否相同
+    这样可以兼容 OpenCode 发送完整历史的情况
     """
     if not last_hash:
         return False
-
-    current_user_hash = get_user_messages_hash(current_messages)
-    if current_user_hash != last_hash:
-        return False
-
-    # OpenCode 的工具链路会在同一轮对话中插入 assistant/tool 消息。
-    # 只要存在这些消息，就应当视为同一会话继续，而不是重置上下文。
-    has_assistant_or_tool = any(
-        (m.role if hasattr(m, 'role') else m.get('role', '')) in {"assistant", "tool"}
-        for m in current_messages
-    )
-    if has_assistant_or_tool:
-        return True
     
-    # 找到所有用户消息
-    user_indices = [i for i, m in enumerate(current_messages)
-                    if (m.role if hasattr(m, 'role') else m.get('role', '')) == "user"]
-
-    if len(user_indices) <= 1:
-        # 只有一条用户消息，视为新对话
-        return False
-
-    # 去掉最后一条用户消息，计算剩余消息的 hash
-    last_user_idx = user_indices[-1]
-    prev_messages = current_messages[:last_user_idx]
-    prev_hash = get_user_messages_hash(prev_messages)
-
-    return prev_hash == last_hash
+    # 找最后一条用户消息
+    for m in reversed(current_messages):
+        role = m.role if hasattr(m, 'role') else m.get('role', '')
+        if role == "user":
+            content = m.content if hasattr(m, 'content') else m.get('content', '')
+            if isinstance(content, list):
+                text_parts = [item.get('text', '') for item in content if item.get('type') == 'text']
+                current_hash = hashlib.md5(' '.join(text_parts).encode()).hexdigest()
+            else:
+                current_hash = hashlib.md5(str(content).encode()).hexdigest()
+            
+            # 对比最后一条消息的 hash
+            return current_hash == last_hash
+    
+    return True  # 没有用户消息，视为延续
 
 
 @app.post("/v1/chat/completions")
@@ -2569,7 +2557,18 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                 messages = [{"role": "system", "content": tools_prompt}] + messages
 
         response = client.chat(messages=messages, model=request.model)
-        _last_user_messages_hash = get_user_messages_hash(request.messages)
+        
+        # 保存最后一条用户消息的 hash
+        for m in reversed(request.messages):
+            role = m.role if hasattr(m, 'role') else m.get('role', '')
+            if role == "user":
+                content = m.content if hasattr(m, 'content') else m.get('content', '')
+                if isinstance(content, list):
+                    text_parts = [item.get('text', '') for item in content if item.get('type') == 'text']
+                    _last_user_messages_hash = hashlib.md5(' '.join(text_parts).encode()).hexdigest()
+                else:
+                    _last_user_messages_hash = hashlib.md5(str(content).encode()).hexdigest()
+                break
         
         reply_content = response.choices[0].message.content
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
