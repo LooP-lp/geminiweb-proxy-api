@@ -1148,16 +1148,9 @@ class GeminiClient:
         images = []
         
         if messages:
-            # 新会话检测：如果第一条消息和上次完全不同，重置上下文
-            if self.conversation_id and self.messages:
-                first_msg = str(messages[0].get("content", ""))[:50] if messages else ""
-                last_stored = str(self.messages[0].content)[:50] if self.messages else ""
-                if first_msg != last_stored:
-                    print(f"[INFO] 检测到新会话，重置上下文")
-                    self.reset()
-            
             # 增量模式：conversation_id 存在时只发最新消息，不发历史
             if self.conversation_id and self.conversation_id.strip():
+                # 只取最后一条用户消息
                 last_msg = messages[-1]
                 print(f"[DEBUG] conversation_id={self.conversation_id[:20]}... 进入增量模式")
                 role = last_msg.get("role", "user")
