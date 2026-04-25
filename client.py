@@ -750,6 +750,7 @@ class GeminiClient:
                                                 if isinstance(inner_json[1], list):
                                                     if len(inner_json[1]) > 0:
                                                         self.conversation_id = inner_json[1][0] or self.conversation_id
+                                                        print(f"[DEBUG] 提取到 conversation_id: {self.conversation_id[:20]}...")
                                                     if len(inner_json[1]) > 1:
                                                         self.response_id = inner_json[1][1] or self.response_id
                                             if len(candidate) > 0:
@@ -1147,11 +1148,11 @@ class GeminiClient:
         images = []
         
         if messages:
-            # 增量模式：有 conversation_id 时只发送纯新消息，不发送历史
-            # Gemini 服务器端已有完整上下文
-            if self.conversation_id and self.messages:
+            # 增量模式：conversation_id 存在时只发最新消息，不发历史
+            if self.conversation_id and self.conversation_id.strip():
                 # 只取最后一条用户消息
                 last_msg = messages[-1]
+                print(f"[DEBUG] conversation_id={self.conversation_id[:20]}... 进入增量模式")
                 role = last_msg.get("role", "user")
                 content = last_msg.get("content", "")
                 

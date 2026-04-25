@@ -2536,8 +2536,8 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
     try:
         client = get_client()
         
-        if not is_continuation(request.messages, _last_user_messages_hash):
-            client.reset()
+        # 不自动 reset，由 client.py 根据 conversation_id 决定发送策略
+        # 这样增量模式才能生效
         
         # 处理消息
         messages = []
