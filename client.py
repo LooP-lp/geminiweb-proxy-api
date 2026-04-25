@@ -17,6 +17,18 @@ from datetime import datetime
 import time
 
 
+# Token 估算 - 直接使用 tiktoken
+import tiktoken
+_TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+
+
+def estimate_tokens(text: str) -> int:
+    """估算文本的 token 数量"""
+    if not text:
+        return 0
+    return len(_TIKTOKEN_ENC.encode(text))
+
+
 class CookieExpiredError(Exception):
     """Cookie 过期或无效异常"""
     pass
@@ -543,6 +555,34 @@ class GeminiClient:
                 if result:
                     return result
         return None
+    
+    def _split_text(self, text: str, max_size: int) -> list:
+        """拆分大文本为多个部分，保持段落完整性"""
+        lines = text.split("\n\n")
+        parts = []
+        current = ""
+        
+        for line in lines:
+            # 尝试在段落中间拆分
+            if len(current) + len(line) <= max_size:
+                current += ("\n\n" if current else "") + line
+            else:
+                if current:
+                    parts.append(current)
+                # 如果单行就超过限制，强制拆分
+                if len(line) > max_size:
+                    # 按字符拆分，每块 overlap 一点保持连贯
+                    for i in range(0, len(line), max_size - 100):
+                        chunk = line[i:i + max_size - 100]
+                        parts.append(chunk)
+                    current = ""
+                else:
+                    current = line
+        
+        if current:
+            parts.append(current)
+        
+        return parts if parts else [text]
     
     def _build_request_data(self, text: str, images: List[Dict] = None, image_paths: List[str] = None, model: str = None) -> str:
         """构建请求数据 - 基于真实请求格式"""
@@ -1107,10 +1147,13 @@ class GeminiClient:
         images = []
         
         if messages:
-            # OpenAI 格式 - 合并所有消息
-            for msg in messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
+            # 增量模式：有 conversation_id 时只发送纯新消息，不发送历史
+            # Gemini 服务器端已有完整上下文
+            if self.conversation_id and self.messages:
+                # 只取最后一条用户消息
+                last_msg = messages[-1]
+                role = last_msg.get("role", "user")
+                content = last_msg.get("content", "")
                 
                 if role == "user":
                     t, imgs = self._parse_content(content)
@@ -1118,49 +1161,91 @@ class GeminiClient:
                         text_parts.append(t)
                     if imgs:
                         images.extend(imgs)
-                elif role == "assistant":
-                    # 助手消息也加入上下文
-                    if isinstance(content, str) and content:
-                        text_parts.append(f"[助手回复]: {content}")
-                    elif isinstance(content, list) and content:
-                        content_text, _ = self._parse_content(content)
-                        if content_text:
-                            text_parts.append(f"[助手回复]: {content_text}")
-                    tool_calls = msg.get("tool_calls") or []
-                    if tool_calls:
-                        tool_call_lines = []
-                        for tc in tool_calls:
-                            fn = (tc or {}).get("function", {})
-                            name = fn.get("name", "")
-                            arguments = fn.get("arguments", "")
-                            tool_call_lines.append(f"- {name}({arguments})")
-                        if tool_call_lines:
-                            text_parts.append("[工具调用]:\n" + "\n".join(tool_call_lines))
-                elif role == "system":
-                    # system 消息作为前置指令
-                    if isinstance(content, str) and content:
-                        text_parts.insert(0, content)
                 elif role == "tool":
-                    # 工具执行结果也需要进入上下文，供下一轮推理使用
-                    tool_call_id = msg.get("tool_call_id", "")
-                    tool_name = msg.get("name", "")
-                    if isinstance(content, list):
-                        content_text, _ = self._parse_content(content)
-                    else:
-                        content_text = str(content) if content is not None else ""
+                    tool_call_id = last_msg.get("tool_call_id", "")
+                    tool_name = last_msg.get("name", "")
+                    content_text = str(content) if content is not None else ""
                     tool_header = "[工具结果]"
                     if tool_name:
                         tool_header += f" {tool_name}"
-                    if tool_call_id:
-                        tool_header += f" ({tool_call_id})"
                     if content_text:
                         text_parts.append(f"{tool_header}: {content_text}")
                     else:
                         text_parts.append(tool_header)
+                
+                if self.debug:
+                    print(f"[DEBUG] 增量模式: 仅发送最新消息 (无历史)")
+            else:
+                # 全量模式：第一轮对话发送所有消息
+                for msg in messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    
+                    if role == "user":
+                        t, imgs = self._parse_content(content)
+                        if t:
+                            text_parts.append(t)
+                        if imgs:
+                            images.extend(imgs)
+                    elif role == "assistant":
+                        if isinstance(content, str) and content:
+                            text_parts.append(f"[助手回复]: {content}")
+                        elif isinstance(content, list) and content:
+                            content_text, _ = self._parse_content(content)
+                            if content_text:
+                                text_parts.append(f"[助手回复]: {content_text}")
+                    elif role == "system":
+                        if isinstance(content, str) and content:
+                            text_parts.insert(0, content)
+                    elif role == "tool":
+                        tool_call_id = msg.get("tool_call_id", "")
+                        tool_name = msg.get("name", "")
+                        content_text = str(content) if content is not None else ""
+                        tool_header = "[工具结果]"
+                        if tool_name:
+                            tool_header += f" {tool_name}"
+                        if tool_call_id:
+                            tool_header += f" ({tool_call_id})"
+                        if content_text:
+                            text_parts.append(f"{tool_header}: {content_text}")
+                        else:
+                            text_parts.append(tool_header)
 
-                self.messages.append(Message(role=role, content=content))
+                    self.messages.append(Message(role=role, content=content))
             
             text = "\n\n".join(text_parts)
+
+            # 大文本拆分: > 80KB 时拆分成多个请求
+            MAX_SIZE = 80 * 1024  # 80KB
+            if len(text) > MAX_SIZE:
+                print(f"[INFO] 文本过大 ({len(text)//1024}KB)，拆分成多个请求...")
+                parts = self._split_text(text, MAX_SIZE)
+                responses = []
+                for i, part in enumerate(parts):
+                    print(f"[INFO] 请求 {i+1}/{len(parts)} ({len(part)//1024}KB)...")
+                    resp = self._send_request(part, images if i == 0 else None, model)
+                    responses.append(resp.choices[0].message.content)
+                    images = None  # 只第一部分带图片
+                    time.sleep(0.5)  # 避免请求过快
+
+                # 合并所有响应
+                reply_text = "\n\n---\n\n".join(responses)
+                self.messages.append(Message(role="assistant", content=reply_text))
+                return ChatCompletionResponse(
+                    id=f"chatcmpl-{self.conversation_id or 'gemini'}-{int(time.time())}",
+                    created=int(time.time()),
+                    model="gemini-web",
+                    choices=[ChatCompletionChoice(
+                        index=0,
+                        message=Message(role="assistant", content=reply_text),
+                        finish_reason="stop"
+                    )],
+                    usage=Usage(
+                        prompt_tokens=estimate_tokens(text),
+                        completion_tokens=estimate_tokens(reply_text),
+                        total_tokens=estimate_tokens(text) + estimate_tokens(reply_text)
+                    )
+                )
         elif message:
             text = message
             self.messages.append(Message(role="user", content=message))
@@ -1317,9 +1402,9 @@ class GeminiClient:
                         )
                     ],
                     usage=Usage(
-                        prompt_tokens=len(text),
-                        completion_tokens=len(reply_text),
-                        total_tokens=len(text) + len(reply_text)
+                        prompt_tokens=estimate_tokens(text),
+                        completion_tokens=estimate_tokens(reply_text),
+                        total_tokens=estimate_tokens(text) + estimate_tokens(reply_text)
                     )
                 )
                 
