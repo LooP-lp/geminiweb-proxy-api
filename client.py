@@ -1150,9 +1150,10 @@ class GeminiClient:
         if messages:
             # 增量模式：conversation_id 存在时只发最新消息，不发历史
             if self.conversation_id and self.conversation_id.strip():
-                # 只取最后一条用户消息
-                last_msg = messages[-1]
                 print(f"[DEBUG] conversation_id={self.conversation_id[:20]}... 进入增量模式")
+                
+                # 处理最后一条消息
+                last_msg = messages[-1]
                 role = last_msg.get("role", "user")
                 content = last_msg.get("content", "")
                 
@@ -1172,6 +1173,19 @@ class GeminiClient:
                     if content_text:
                         text_parts.append(f"{tool_header}: {content_text}")
                     else:
+                        text_parts.append(tool_header)
+                elif role == "assistant":
+                    # 检查是否有 tool_calls
+                    tool_calls = last_msg.get("tool_calls") or []
+                    if tool_calls:
+                        tc_lines = []
+                        for tc in tool_calls:
+                            fn = (tc or {}).get("function", {})
+                            name = fn.get("name", "")
+                            args = fn.get("arguments", "")
+                            tc_lines.append(f"- {name}({args})")
+                        if tc_lines:
+                            text_parts.append("[工具调用]:\n" + "\n".join(tc_lines))
                         text_parts.append(tool_header)
                 
                 if self.debug:
@@ -1216,8 +1230,8 @@ class GeminiClient:
             
             text = "\n\n".join(text_parts)
 
-            # 大文本拆分: > 80KB 时拆分成多个请求
-            MAX_SIZE = 80 * 1024  # 80KB
+            # 大文本拆分: > 78KB 时拆分成多个请求
+            MAX_SIZE = 78 * 1024  # 78KB
             if len(text) > MAX_SIZE:
                 print(f"[INFO] 文本过大 ({len(text)//1024}KB)，拆分成多个请求...")
                 parts = self._split_text(text, MAX_SIZE)
@@ -1227,7 +1241,7 @@ class GeminiClient:
                     resp = self._send_request(part, images if i == 0 else None, model)
                     responses.append(resp.choices[0].message.content)
                     images = None  # 只第一部分带图片
-                    time.sleep(0.5)  # 避免请求过快
+                    time.sleep(random.uniform(0.3, 0.8))  # 避免请求过快
 
                 # 合并所有响应
                 reply_text = "\n\n---\n\n".join(responses)
