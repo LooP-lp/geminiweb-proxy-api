@@ -227,6 +227,28 @@ class DBManager:
             print(f"查询API Key失败: {e}")
             return []
 
+    def get_api_keys(self):
+        """获取所有有效的 API Key（用于 current-key API）"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, user_id, api_key, note, created_at, last_used_at, is_active
+                       FROM api_keys WHERE is_active = TRUE ORDER BY last_used_at DESC NULLS LAST"""
+                )
+                rows = cur.fetchall()
+                return [{
+                    "id": r[0],
+                    "user_id": r[1],
+                    "api_key": r[2],
+                    "note": r[3],
+                    "created_at": r[4].isoformat() if r[4] else None,
+                    "last_used_at": r[5].isoformat() if r[5] else None,
+                    "is_active": r[6]
+                } for r in rows]
+        except Exception as e:
+            print(f"获取所有API Key失败: {e}")
+            return []
+
     def delete_api_key(self, user_id, key_id):
         """删除用户的指定API Key"""
         try:

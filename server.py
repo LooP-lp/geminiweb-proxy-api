@@ -6,6 +6,9 @@ Gemini OpenAI 兼容 API 服务
 API:  http://localhost:7788/v1
 """
 
+import warnings
+warnings.filterwarnings('ignore')
+
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
@@ -22,20 +25,41 @@ import hashlib
 import secrets
 import asyncio
 import threading
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY", "") # 从 .env 或环境变量读取
 
 # ============ 配置 ============
-API_KEY = "sk-geminixxxxx"  # 兼容旧版单key鉴权
-HOST = "0.0.0.0"
-PORT = 7788
-ALLOW_DB_API_KEYS = True  # 允许使用数据库中的API Key
-CONFIG_FILE = "config_data.json"
-# Token 自动刷新配置
-TOKEN_REFRESH_INTERVAL_MIN = 200  # 刷新间隔最小秒数
-TOKEN_REFRESH_INTERVAL_MAX = 300  # 刷新间隔最大秒数
-TOKEN_AUTO_REFRESH = True  # 是否启用自动刷新
-TOKEN_BACKGROUND_REFRESH = True  # 是否启用后台定时刷新（防止长时间不用失效）
-# 媒体文件外网访问地址 (留空则使用 localhost)
-MEDIA_BASE_URL = "http://127.0.0.1:7788"
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "7788"))
+ALLOW_DB_API_KEYS = os.getenv("ALLOW_DB_API_KEYS", "true").lower() == "true"
+CONFIG_FILE = os.getenv("CONFIG_FILE", "config_data.json")
+TOKEN_REFRESH_INTERVAL_MIN = int(os.getenv("TOKEN_REFRESH_INTERVAL_MIN", "200"))
+TOKEN_REFRESH_INTERVAL_MAX = int(os.getenv("TOKEN_REFRESH_INTERVAL_MAX", "300"))
+TOKEN_AUTO_REFRESH = os.getenv("TOKEN_AUTO_REFRESH", "true").lower() == "true"
+TOKEN_BACKGROUND_REFRESH = os.getenv("TOKEN_BACKGROUND_REFRESH", "true").lower() == "true"
+MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", "http://127.0.0.1:7788")
+
+# 外部代理 API 配置
+EXTERNAL_API_URL = os.getenv("EXTERNAL_API_URL", "")
+EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY", "")
+
+# 所有可用模型（Gemini 本地 + 外部代理）
+ALL_MODELS = [
+    "gemini-3.0-flash",
+    "gemini-3.0-flash-thinking",
+    "gemini-3.1-pro",
+    "deepseek-v4-pro-search",
+    "英伟达/deepseek-ai/deepseek-v4-pro",
+    "英伟达/minimaxai/minimax-m2.7",
+    "英伟达/z-ai/glm-5.1",
+]
+
+# 代理模型集合（请求这些模型时转发到外部 API）
+PROXY_MODELS = {"deepseek-v4-pro-search", "英伟达/deepseek-ai/deepseek-v4-pro", "英伟达/minimaxai/minimax-m2.7", "英伟达/z-ai/glm-5.1"}
+
 # ==============================
 
 import random
@@ -492,14 +516,14 @@ def build_tools_prompt(tools: List[Dict]) -> str:
     
     prompt = f"""[系统指令] 你是一个遵循 OpenAI 工具调用协议的助手。
 
-当需要使用工具时，只输出一个有效的工具调用 JSON，不要输出解释性文字。
+当需要使用工具时，先在 <think> 标签中简要思考，然后输出工具调用 JSON。
 如果不需要工具，可以正常回答。
 
 可用函数:
 {tools_schema}
 
 严格规则:
-1. 如果需要调用函数，只能输出以下格式，不要有任何其他文字:
+1. 如果需要调用函数，先输出 <think>思考过程</think>，然后只输出以下格式:
 ```tool_call
 {{"name": "函数名", "arguments": {{"参数": "值"}}}}
 ```
@@ -512,10 +536,24 @@ def build_tools_prompt(tools: List[Dict]) -> str:
 
 def parse_tool_calls(content: str) -> tuple:
     """
-    解析响应中的工具调用
-    返回: (tool_calls列表, 剩余文本内容)
+    解析响应中的工具调用和思考过程
+    返回: (tool_calls列表, 剩余文本内容, 思考过程)
     """
     tool_calls = []
+    thinking = ""
+
+    # extract <think>...</think> or &#10094;...&#10095; thinking tags
+    think_patterns = [
+        r'<think>(.*?)</think>',
+        r'\U0001f14d\U0001f14d(.*?)\U0001f14e\U0001f14e',
+    ]
+    cleaned = content
+    for pat in think_patterns:
+        m = re.search(pat, cleaned, re.DOTALL)
+        if m:
+            thinking = m.group(1).strip()
+            cleaned = re.sub(pat, '', cleaned, flags=re.DOTALL).strip()
+            break
 
     def extract_json_blobs(text: str) -> List[str]:
         """从文本中提取平衡的大括号 JSON 片段，支持嵌套对象和字符串转义。"""
@@ -555,14 +593,15 @@ def parse_tool_calls(content: str) -> tuple:
                 i = start + 1
         return blobs
 
-    # 优先提取代码块中的内容，其次提取全文中的 JSON 片段
+    # use cleaned content (without thinking tags) for tool parsing
+    candidates_list = []
     code_block_pattern = r'```(?:tool_call|json)?\s*\n?(.*?)\n?```'
-    candidates = re.findall(code_block_pattern, content, re.DOTALL)
-    if not candidates:
-        candidates = [content]
+    candidates_list = re.findall(code_block_pattern, cleaned, re.DOTALL)
+    if not candidates_list:
+        candidates_list = [cleaned]
 
     seen = set()
-    for candidate in candidates:
+    for candidate in candidates_list:
         for blob in extract_json_blobs(candidate):
             if blob in seen:
                 continue
@@ -581,14 +620,14 @@ def parse_tool_calls(content: str) -> tuple:
                     }
                 })
 
-    remaining = content
+    remaining = cleaned
     for blob in seen:
         remaining = remaining.replace(blob, "")
     remaining = re.sub(r'```(?:tool_call|json)?\s*', '', remaining)
     remaining = remaining.replace('```', '')
     remaining = remaining.strip()
 
-    return tool_calls, remaining
+    return tool_calls, remaining, thinking
 
 
 def load_config():
@@ -825,8 +864,13 @@ def get_admin_html():
         .tab-content.active{display:flex;opacity:1;transform:translateY(0);}
         /* === Chat Header === */
         .chat-header{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface);transition:background .3s,border-color .3s;}
-        .chat-header select{background:transparent;color:var(--text);border:none;padding:8px 12px 8px 8px;font-size:14px;font-weight:500;cursor:pointer;border-radius:8px;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235f6368' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;}
-        [data-theme="dark"] .chat-header select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239aa0a6' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");}
+        .chat-header select{background:transparent;color:var(--text);border:1px solid var(--border);padding:6px 28px 6px 10px;font-size:13px;font-weight:500;cursor:pointer;border-radius:20px;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235f6368' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;transition:all .15s ease;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.chat-header select:hover{border-color:var(--blue);background-color:rgba(26,115,232,.06);}
+.chat-header select:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,115,232,.15);}
+.chat-header select option{padding:8px;font-size:13px;background:var(--surface);color:var(--text);}
+.chat-header select optgroup{font-weight:700;font-style:normal;color:var(--muted);padding:4px 0 0 0;}
+        [data-theme="dark"] .chat-header select:hover{background-color:rgba(138,180,248,.08);}
+[data-theme="dark"] .chat-header select option{background:var(--surface-2);color:var(--text);}
         .chat-header select:hover{background-color:rgba(0,0,0,0.04);[data-theme="dark"] &{background-color:rgba(255,255,255,0.08);}}
         .chat-shell{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg);}
         .chat-messages{flex:1;min-height:0;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px;}
@@ -842,8 +886,16 @@ def get_admin_html():
         .msg.assistant li{margin:3px 0;}
         .msg.assistant strong{color:var(--blue);}
         .msg.assistant em{color:var(--green);}
-        .msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:20px;color:var(--muted);font-size:14px;}
-        .msg.thinking::before{content:'';display:inline-block;width:20px;height:20px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin .8s linear infinite;}
+.msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:20px;color:var(--muted);font-size:14px;}
+.msg.thinking::before{content:'';display:inline-block;width:20px;height:20px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin .8s linear infinite;}
+.thinking-block{margin-bottom:8px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface-2);}
+.thinking-toggle{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;font-size:12px;color:var(--muted);user-select:none;transition:background .15s;}
+.thinking-toggle:hover{background:rgba(0,0,0,.04);}
+[data-theme="dark"] .thinking-toggle:hover{background:rgba(255,255,255,.06);}
+.thinking-toggle .arrow{display:inline-block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid var(--muted);transition:transform .2s;}
+.thinking-toggle.collapsed .arrow{transform:rotate(-90deg);}
+.thinking-content{padding:8px 12px;font-size:13px;color:var(--muted);line-height:1.5;max-height:200px;overflow-y:auto;border-top:1px solid var(--border);transition:max-height .3s ease;}
+.thinking-content.collapsed{max-height:0;padding:0 12px;border-top:none;overflow:hidden;}
         @keyframes spin{to{transform:rotate(360deg);}}
         /* === Chat Input === */
         .chat-input-area{padding:12px 20px;border-top:1px solid var(--border);background:var(--surface);transition:background .3s,border-color .3s;}
@@ -1156,9 +1208,28 @@ def get_admin_html():
     </div>
 
     <script>
-    const API_KEY = "''' + API_KEY + '''";
+    function getApiKey() {
+        var key = localStorage.getItem('api_key') || localStorage.getItem('admin_api_key') || '';
+        if (!key) {
+            key = 'sk-webchat-default';
+            localStorage.setItem('admin_api_key', key);
+        }
+        return key;
+    }
     const PORT = ''' + str(PORT) + ''';
     const BASE_URL = location.protocol + "//" + location.host;
+    
+    // 立即获取有效API Key
+    fetch('/admin/current-key', {credentials: 'same-origin'}).then(function(r) {
+        if (r.ok) return r.json();
+    }).then(function(data) {
+        if (data && data.api_key) {
+            localStorage.setItem('admin_api_key', data.api_key);
+        }
+        loadModels();
+        updateTokenBadge();
+        setInterval(updateTokenBadge, 30000);
+    });
 
     // ===== Theme System =====
     (function() {
@@ -1220,7 +1291,6 @@ def get_admin_html():
         var map = {chat:0, console:1, config:2};
         if (map[name] !== undefined) items[map[name]].classList.add('active');
         if (name === 'console') loadConsoleData();
-        if (name === 'config') loadConfigData();
     }
 
     // ===== Simple Markdown Renderer =====
@@ -1263,17 +1333,28 @@ def get_admin_html():
     var isSending = false;
 
     // Load models into selector
-    async function loadModels() {
+async function loadModels() {
         try {
-            var resp = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+API_KEY}});
-            var data = await resp.json();
-            var sel = document.getElementById('modelSelect');
-            sel.innerHTML = '';
-            (data.data || []).forEach(function(m) {
-                var opt = document.createElement('option');
-                opt.value = m.id; opt.textContent = m.id;
-                sel.appendChild(opt);
-            });
+        var resp = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+getApiKey()}});
+        var data = await resp.json();
+        var sel = document.getElementById('modelSelect');
+        sel.innerHTML = '';
+        var geminiGroup = document.createElement('optgroup');
+        geminiGroup.label = 'Gemini';
+        var proxyGroup = document.createElement('optgroup');
+        proxyGroup.label = '\u82F3\u4F1F\u8FBE / \u4EE3\u7406';
+        (data.data || []).forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.id;
+            if (m.id.startsWith('\u82F3\u4F1F\u8FBE/')) {
+                proxyGroup.appendChild(opt);
+} else {
+                geminiGroup.appendChild(opt);
+            }
+        });
+        if (geminiGroup.children.length > 0) sel.appendChild(geminiGroup);
+        if (proxyGroup.children.length > 0) sel.appendChild(proxyGroup);
             return data.data || [];
         } catch(e) { console.error(e); return []; }
     }
@@ -1315,11 +1396,11 @@ def get_admin_html():
         var div = document.createElement('div');
         div.className = 'msg ' + role;
         if (role === 'assistant') {
-            div.innerHTML = renderMd(content) + '<span class="msg-time">' + timeStr() + '</span>';
+            div.setAttribute('data-time', timeStr());
+            div.innerHTML = renderMd(content);
         } else if (role === 'thinking') {
             div.textContent = content;
         } else {
-            // User: show text + image thumbnails
             var html = '';
             if (extra && extra.images && extra.images.length > 0) {
                 html += '<div style="margin-bottom:8px;">';
@@ -1334,6 +1415,21 @@ def get_admin_html():
         container.appendChild(div);
         container.scrollTop = container.scrollHeight;
         return div;
+    }
+
+    function updateAssistantDiv(div, replyContent, thinkingContent) {
+        var html = '';
+        if (thinkingContent) {
+            html += '<div class="thinking-block">';
+            html += '<div class="thinking-toggle collapsed" onclick="this.classList.toggle(&quot;collapsed&quot;);this.nextElementSibling.classList.toggle(&quot;collapsed&quot;);">';
+            html += '<span class="arrow"></span> \u601d\u8003\u8fc7\u7a0b</div>';
+            html += '<div class="thinking-content collapsed">' + renderMd(thinkingContent) + '</div>';
+            html += '</div>';
+        }
+        html += renderMd(replyContent);
+        html += '<span class="msg-time">' + div.getAttribute('data-time') + '</span>';
+        div.innerHTML = html;
+        div.parentElement.scrollTop = div.parentElement.scrollHeight;
     }
 
     function text2html(t) {
@@ -1382,28 +1478,77 @@ def get_admin_html():
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + API_KEY
+                    'Authorization': 'Bearer ' + getApiKey()
                 },
                 body: JSON.stringify({
                     model: model,
                     messages: chatHistory,
-                    stream: false
+                    stream: true
                 })
             });
-            var data = await resp.json();
+            
+if (!resp.ok) {
+            var errData = await resp.json();
             thinkDiv.remove();
-
-            if (data.error) {
-                addMessage('assistant', '错误: ' + (data.error.message || data.detail || JSON.stringify(data.error)));
-            } else {
-                var reply = data.choices[0].message.content || '';
-                addMessage('assistant', reply);
-                chatHistory.push({role: 'assistant', content: reply});
-            }
-        } catch(e) {
-            thinkDiv.remove();
-            addMessage('assistant', '请求失败: ' + e.message);
+            addMessage('assistant', '\u9519\u8bef: ' + (errData.detail || errData.error || '\u8bf7\u6c42\u5931\u8d25'));
+            isSending = false;
+            document.getElementById('sendBtn').disabled = false;
+            return;
         }
+
+        var replyDiv = addMessage('assistant', '');
+        var replyContent = '';
+        var thinkingContent = '';
+        var thinkingDone = false;
+
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+
+        while (true) {
+            var result = await reader.read();
+            if (result.done) break;
+            var chunk = decoder.decode(result.value);
+            var lines = chunk.split(String.fromCharCode(10));
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (line.startsWith('data: ')) {
+                    var dataStr = line.substring(6);
+                    if (dataStr === '[DONE]') continue;
+                    try {
+                        var data = JSON.parse(dataStr);
+                        var delta = data.choices[0].delta;
+                        if (delta) {
+                            // reasoning_content: deepseek-v4 / glm-5.1 thinking
+                            if (delta.reasoning_content) {
+                                thinkingContent += delta.reasoning_content;
+                                updateAssistantDiv(replyDiv, replyContent, thinkingContent);
+                            }
+                            // content: normal reply
+                            if (delta.content) {
+                                if (thinkingContent && !thinkingDone) {
+                                    thinkingDone = true;
+                                }
+                                replyContent += delta.content;
+                                updateAssistantDiv(replyDiv, replyContent, thinkingContent);
+                            }
+                        }
+                    } catch(e) {}
+                }
+            }
+        }
+
+        // remove thinking spinner after stream ends
+        if (thinkDiv && thinkDiv.parentElement) thinkDiv.remove();
+
+        // final update with time
+        updateAssistantDiv(replyDiv, replyContent, thinkingContent);
+
+        chatHistory.push({role: 'assistant', content: replyContent});
+            
+} catch(e) {
+        if (thinkDiv && thinkDiv.parentElement) thinkDiv.remove();
+        addMessage('assistant', '\u8bf7\u6c42\u5931\u8d25: ' + e.message);
+    }
 
         isSending = false;
         document.getElementById('sendBtn').disabled = false;
@@ -1425,7 +1570,7 @@ def get_admin_html():
     async function updateTokenBadge() {
         var badges = [document.getElementById('tokenBadge'), document.getElementById('cfgTokenBadge')];
         try {
-            var resp = await fetch('/v1/token/status', {headers:{'Authorization':'Bearer '+API_KEY}});
+            var resp = await fetch('/v1/token/status', {headers:{'Authorization':'Bearer '+getApiKey()}});
             var data = await resp.json();
             badges.forEach(function(b) {
                 if (!b) return;
@@ -1457,7 +1602,7 @@ def get_admin_html():
     function refreshTokenNow() {
         fetch('/v1/token/refresh', {
             method: 'POST',
-            headers: {'Authorization': 'Bearer ' + API_KEY}
+            headers: {'Authorization': 'Bearer ' + getApiKey()}
         }).then(function(r) { return r.json(); }).then(function() {
             updateTokenBadge();
             loadConsoleData();
@@ -1469,7 +1614,7 @@ def get_admin_html():
     function resetClientNow() {
         fetch('/v1/client/reset', {
             method: 'POST',
-            headers: {'Authorization': 'Bearer ' + API_KEY}
+            headers: {'Authorization': 'Bearer ' + getApiKey()}
         }).then(function(r) { return r.json(); }).then(function() {
             loadConsoleData();
         }).catch(function(err) {
@@ -1555,7 +1700,7 @@ def get_admin_html():
 
         // Models list
         try {
-            var resp2 = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+API_KEY}});
+            var resp2 = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+getApiKey()}});
             var mdata = await resp2.json();
             var ml = document.getElementById('modelsList');
             ml.innerHTML = '';
@@ -1569,7 +1714,7 @@ def get_admin_html():
         } catch(e) {}
 
         // Rust code
-        document.getElementById('rustCode').textContent = '// Cargo.toml 依赖\\n// [dependencies]\\n// reqwest = { version = "0.12", features = ["json"] }\\n// serde = { version = "1", features = ["derive"] }\\n// serde_json = "1"\\n// tokio = { version = "1", features = ["full"] }\\n\\nuse serde::{Deserialize, Serialize};\\n\\n#[derive(Serialize)]\\nstruct ChatRequest {\\n    model: String,\\n    messages: Vec<Message>,\\n    stream: bool,\\n}\\n\\n#[derive(Serialize)]\\nstruct Message {\\n    role: String,\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ChatResponse {\\n    choices: Vec<Choice>,\\n    usage: Usage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Choice {\\n    message: ResponseMessage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ResponseMessage {\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Usage {\\n    prompt_tokens: u32,\\n    completion_tokens: u32,\\n    total_tokens: u32,\\n}\\n\\n#[tokio::main]\\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\\n    let client = reqwest::Client::new();\\n    \\n    let request = ChatRequest {\\n        model: "gemini-3.0-flash".to_string(),\\n        messages: vec![Message {\\n            role: "user".to_string(),\\n            content: "你好".to_string(),\\n        }],\\n        stream: false,\\n    };\\n\\n    let response = client\\n        .post("' + BASE_URL + '/v1/chat/completions")\\n        .header("Authorization", "Bearer ' + API_KEY + '")\\n        .json(&request)\\n        .send()\\n        .await?\\n        .json::<ChatResponse>()\\n        .await?;\\n\\n    println!("回复: {}", response.choices[0].message.content);\\n    println!("Token 用量: {}", response.usage.total_tokens);\\n    \\n    Ok(())\\n}';
+        document.getElementById('rustCode').textContent = '// Cargo.toml 依赖\\n// [dependencies]\\n// reqwest = { version = "0.12", features = ["json"] }\\n// serde = { version = "1", features = ["derive"] }\\n// serde_json = "1"\\n// tokio = { version = "1", features = ["full"] }\\n\\nuse serde::{Deserialize, Serialize};\\n\\n#[derive(Serialize)]\\nstruct ChatRequest {\\n    model: String,\\n    messages: Vec<Message>,\\n    stream: bool,\\n}\\n\\n#[derive(Serialize)]\\nstruct Message {\\n    role: String,\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ChatResponse {\\n    choices: Vec<Choice>,\\n    usage: Usage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Choice {\\n    message: ResponseMessage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ResponseMessage {\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Usage {\\n    prompt_tokens: u32,\\n    completion_tokens: u32,\\n    total_tokens: u32,\\n}\\n\\n#[tokio::main]\\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\\n    let client = reqwest::Client::new();\\n    \\n    let request = ChatRequest {\\n        model: "gemini-3.0-flash".to_string(),\\n        messages: vec![Message {\\n            role: "user".to_string(),\\n            content: "你好".to_string(),\\n        }],\\n        stream: false,\\n    };\\n\\n    let response = client\\n        .post("' + BASE_URL + '/v1/chat/completions")\\n        .header("Authorization", "Bearer ' + getApiKey() + '")\\n        .json(&request)\\n        .send()\\n        .await?\\n        .json::<ChatResponse>()\\n        .await?;\\n\\n    println!("回复: {}", response.choices[0].message.content);\\n    println!("Token 用量: {}", response.usage.total_tokens);\\n    \\n    Ok(())\\n}';
 
         // Auto refresh
         if (consoleTimer) clearInterval(consoleTimer);
@@ -1936,10 +2081,6 @@ def get_admin_html():
     }
     var greetingEl = document.getElementById('greetingText');
     if (greetingEl) greetingEl.textContent = getGreeting() + '，' + currentUser;
-    
-    loadModels();
-    updateTokenBadge();
-    setInterval(updateTokenBadge, 30000);
 
     // Expose functions to global scope for onclick handlers
     window.switchTab = switchTab;
@@ -2069,6 +2210,24 @@ async def admin_get_config(request: Request):
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
     return _config
+
+
+@app.get("/admin/current-key")
+async def get_current_key(request: Request):
+    """获取当前有效的 API Key"""
+    # 优先从数据库获取第一个有效的 key
+    if ALLOW_DB_API_KEYS and db:
+        try:
+            # 获取任意用户的有效 key
+            keys = db.get_api_keys()
+            for key in keys:
+                if key.get("is_active"):
+                    return {"api_key": key.get("api_key")}
+        except Exception as e:
+            print(f"[WARN] 获取 API Key 失败: {e}")
+    
+    # 返回环境变量中的 key（即使是空字符串）
+    return {"api_key": API_KEY}
 
 
 @app.get("/admin/stats")
@@ -2314,7 +2473,7 @@ class ChatCompletionToolCall(BaseModel):
     function: ChatCompletionToolFunction
 
 
-def verify_api_key(authorization: str = Header(None), db_manager=None):
+def verify_api_key(authorization: str = Header(None), db=None):
     """
     验证API Key
     1. 如果配置了ALLOW_DB_API_KEYS则优先查询数据库
@@ -2327,9 +2486,9 @@ def verify_api_key(authorization: str = Header(None), db_manager=None):
     token = authorization[7:]
     
     # 优先检查数据库（如果可用）
-    if ALLOW_DB_API_KEYS and db_manager:
+    if ALLOW_DB_API_KEYS and db:
         try:
-            result = db_manager.verify_api_key_db(token)
+            result = db.verify_api_key_db(token)
             if result:
                 return {"user_id": result["user_id"], "key_id": result["key_id"]}
         except Exception:
@@ -2350,7 +2509,9 @@ async def root():
 @app.get("/v1/models")
 async def list_models(authorization: str = Header(None)):
     verify_api_key(authorization, db)
-    models = _config.get("MODELS", DEFAULT_MODELS)
+    # 合并：配置中的 Gemini 模型 + ALL_MODELS 中的代理模型
+    gemini_models = list(_config.get("MODELS", DEFAULT_MODELS))
+    models = gemini_models + [m for m in ALL_MODELS if m not in gemini_models]
     created = int(time.time())
     return {
         "object": "list",
@@ -2475,14 +2636,122 @@ def is_continuation(current_messages: list, last_hash: str) -> bool:
     return prev_hash == last_hash
 
 
+async def proxy_chat_completions(request: ChatCompletionRequest, authorization: str, db_manager, user_id: int, key_id: int):
+    """代理请求到外部 API（deepseek、minimax、glm 等）"""
+    if not EXTERNAL_API_URL or not EXTERNAL_API_KEY:
+        raise HTTPException(status_code=500, detail="外部 API 未配置")
+
+    # 转换消息格式为外部 API 格式
+    messages = []
+    for m in request.messages:
+        content = m.content
+        message_payload = {"role": m.role, "content": content}
+        if m.name:
+            message_payload["name"] = m.name
+        if m.tool_call_id:
+            message_payload["tool_call_id"] = m.tool_call_id
+        if m.tool_calls:
+            message_payload["tool_calls"] = m.tool_calls
+        messages.append(message_payload)
+
+    # 构建外部 API 请求
+    payload = {
+        "model": request.model,
+        "messages": messages,
+        "stream": request.stream,
+    }
+    if request.tools:
+        payload["tools"] = [t.model_dump() for t in request.tools]
+    if request.tool_choice:
+        payload["tool_choice"] = request.tool_choice
+    if request.temperature is not None:
+        payload["temperature"] = request.temperature
+    if request.max_tokens is not None:
+        payload["max_tokens"] = request.max_tokens
+    if request.top_p is not None:
+        payload["top_p"] = request.top_p
+    if request.stop is not None:
+        payload["stop"] = request.stop
+    if request.n is not None:
+        payload["n"] = request.n
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {EXTERNAL_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        # 非流式请求
+        if not request.stream:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(
+                    f"{EXTERNAL_API_URL}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+
+                if "usage" in result:
+                    try:
+                        db_manager.record_usage(user_id, key_id, request.model,
+                            result["usage"].get("prompt_tokens", 0),
+                            result["usage"].get("completion_tokens", 0))
+                    except Exception:
+                        pass
+                return JSONResponse(content=result)
+
+        # 流式请求：直接透传 SSE
+        async def stream_response():
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as stream_client:
+                async with stream_client.stream(
+                    "POST",
+                    f"{EXTERNAL_API_URL}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as stream_resp:
+                    async for chunk in stream_resp.aiter_text():
+                        if chunk:
+                            yield chunk
+
+        return StreamingResponse(
+            stream_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"外部 API 错误: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"代理请求失败: {str(e)}")
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, authorization: str = Header(None)):
+async def chat_completions(
+    request: ChatCompletionRequest,
+    authorization: str = Header(None),
+    session_id: str = None
+):
     global _last_user_messages_hash
-    
+
     # 验证API Key并获取user_id, key_id用于统计
     auth_result = verify_api_key(authorization, db)
     user_id = auth_result.get("user_id", 0)
     key_id = auth_result.get("key_id", 0)
+
+    # 代理模型：直接转发到外部 API
+    if request.model in PROXY_MODELS and EXTERNAL_API_URL:
+        return await proxy_chat_completions(request, authorization, db, user_id, key_id)
+
+    # 如果提供了 session_id，使用它作为独立的 session 标识
+    if session_id:
+        user_id = hash(session_id) % 1000000
+        if user_id < 0:
+            user_id = -user_id
     
     # 记录请求入参 (图片内容截断显示)
     request_log = {
@@ -2534,10 +2803,13 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         print(f"📷 收到 {image_count} 张图片")
     
     try:
-        client = get_client()
+        # 检查是否是新会话（用户消息 hash 变化），如果是则重置 client
+        if not is_continuation(request.messages, _last_user_messages_hash):
+            if _last_user_messages_hash:  # 有历史 hash 但不匹配，说明是新对话
+                print(f"[SESSION] 检测到新会话，重置 client")
+                reset_client()
         
-        # 不自动 reset，由 client.py 根据 conversation_id 决定发送策略
-        # 这样增量模式才能生效
+        client = get_client()
         
         # 处理消息
         messages = []
@@ -2554,8 +2826,7 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                 message_payload["tool_call_id"] = m.name
             messages.append(message_payload)
 
-        # 保留原始消息，不要把工具提示词硬插到用户消息中。
-        # OpenCode 会自己通过 tool schema 进行工具决策，强行改写内容会破坏协议。
+        # 保留原始消息
         if request.function_call is not None and not request.tool_choice:
             request.tool_choice = request.function_call
 
@@ -2564,24 +2835,61 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             if tools_prompt:
                 messages = [{"role": "system", "content": tools_prompt}] + messages
 
-        response = client.chat(messages=messages, model=request.model)
         _last_user_messages_hash = get_user_messages_hash(request.messages)
         
+        # 统一走非流式拿到完整响应，解析 tool_calls，再以 SSE 推流
+        response = client.chat(messages=messages, model=request.model)
         reply_content = response.choices[0].message.content
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created_time = int(time.time())
         
-        # 解析工具调用
-        tool_calls = []
-        final_content = reply_content
-        if request.tools:
-            tool_calls, final_content = parse_tool_calls(reply_content)
+        # 解析工具调用和思考过程（无论是否有 tools 都提取 thinking）
+        tool_calls, final_content, gemini_thinking = parse_tool_calls(reply_content)
+        if not request.tools:
+            tool_calls = []
 
         # 如果没有解析出工具调用，但请求明确要求工具，保留原始内容返回给客户端
         if request.tools and not tool_calls:
-            final_content = reply_content
+            # 尝试更宽松的匹配：在整段回复中找 opencode 相关的 JSON
+            import re as re_loose
+            try:
+                # 先找 opencode 关键字附近的 JSON 块
+                lower = reply_content.lower()
+                idx = lower.find('opencode')
+                if idx >= 0:
+                    snippet = reply_content[max(0, idx-50):idx+500]
+                    # 提取大括号内的 JSON
+                    brace_start = snippet.find('{')
+                    if brace_start >= 0:
+                        depth = 0
+                        for i in range(brace_start, len(snippet)):
+                            if snippet[i] == '{':
+                                depth += 1
+                            elif snippet[i] == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    blob = snippet[brace_start:i+1]
+                                    try:
+                                        data = json.loads(blob)
+                                        if isinstance(data, dict) and data.get('name', '').lower() == 'opencode':
+                                            args = data.get('arguments', {})
+                                            tool_calls.append({
+                                                "id": f"call_{uuid.uuid4().hex[:8]}",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "opencode",
+                                                    "arguments": json.dumps(args, ensure_ascii=False)
+                                                }
+                                            })
+                                    except:
+                                        pass
+                                    break
+            except:
+                pass
+            if tool_calls:
+                final_content = None
 
-        # 处理流式响应
+# 流式响应
         if request.stream:
             async def generate_stream():
                 chunk_data = ChatCompletionChunkResponse(
@@ -2595,6 +2903,14 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                     )]
                 )
                 yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
+
+                # send thinking content as reasoning_content delta
+                if gemini_thinking:
+                    think_chunk = ChatCompletionChunkResponse(
+                        id=completion_id, created=created_time, model=request.model,
+                        choices=[ChatCompletionChunkChoice(index=0, delta={"reasoning_content": gemini_thinking}, finish_reason=None)]
+                    )
+                    yield f"data: {json.dumps(think_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
                 if tool_calls:
                     for tc in tool_calls:
@@ -2621,17 +2937,21 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                         )
                         yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
                 else:
-                    chunk_data = ChatCompletionChunkResponse(
-                        id=completion_id,
-                        created=created_time,
-                        model=request.model,
-                        choices=[ChatCompletionChunkChoice(
-                            index=0,
-                            delta={"content": final_content},
-                            finish_reason=None
-                        )]
-                    )
-                    yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
+                    # 模拟流式：逐字输出
+                    for i in range(0, len(final_content), 3):
+                        chunk_text = final_content[i:i+3]
+                        chunk_data = ChatCompletionChunkResponse(
+                            id=completion_id,
+                            created=created_time,
+                            model=request.model,
+                            choices=[ChatCompletionChunkChoice(
+                                index=0,
+                                delta={"content": chunk_text},
+                                finish_reason=None
+                            )]
+                        )
+                        yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0.02)
 
                 chunk_data = ChatCompletionChunkResponse(
                     id=completion_id,
@@ -2665,7 +2985,7 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             _stats["total_completion_tokens"] += response.usage.completion_tokens
             _stats["total_tokens"] += response.usage.total_tokens
             _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
-            
+
             try:
                 db.record_usage(user_id, key_id, request.model, response.usage.prompt_tokens, response.usage.completion_tokens)
             except Exception:
@@ -2765,13 +3085,13 @@ async def reset_context(authorization: str = Header(None)):
 load_config()
 
 if __name__ == "__main__":
+    api_key_display = os.getenv("API_KEY", "")[:20] + "..." if os.getenv("API_KEY") else "未设置(请通过数据库)"
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║           Gemini OpenAI Compatible API Server            ║
 ╠══════════════════════════════════════════════════════════╣
 ║  后台配置: http://localhost:{PORT}/admin                   ║
 ║  API 地址: http://localhost:{PORT}/v1                      ║
-║  API Key:  {API_KEY}                                     ║
 ║  Token 自动刷新: {"开启" if TOKEN_BACKGROUND_REFRESH else "关闭"} ({TOKEN_REFRESH_INTERVAL_MIN}-{TOKEN_REFRESH_INTERVAL_MAX}秒随机)  ║
 ╚══════════════════════════════════════════════════════════╝
 """)

@@ -624,7 +624,7 @@ class GeminiClient:
             ["zh-CN"],
             [conv_id, resp_id, choice_id, None, None, None, None, None, None, ""],
             self.snlm0e,
-            None,  # 之前是 "test123"，改为 null
+            None,  
             None,
             [1],
             1,
@@ -750,7 +750,8 @@ class GeminiClient:
                                                 if isinstance(inner_json[1], list):
                                                     if len(inner_json[1]) > 0:
                                                         self.conversation_id = inner_json[1][0] or self.conversation_id
-                                                        print(f"[DEBUG] 提取到 conversation_id: {self.conversation_id[:20]}...")
+                                                        if self.debug:
+                                                            print(f"[DEBUG] 提取到 conversation_id: {self.conversation_id[:20]}...")
                                                     if len(inner_json[1]) > 1:
                                                         self.response_id = inner_json[1][1] or self.response_id
                                             if len(candidate) > 0:
@@ -1454,6 +1455,71 @@ class GeminiClient:
     def get_history(self) -> List[Dict]:
         """获取消息历史 (OpenAI 格式)"""
         return [{"role": m.role, "content": m.content} for m in self.messages]
+
+    def chat_stream(self, text: str = None, images: List[Dict] = None, model: str = None, messages: List[Dict] = None):
+        """流式发送请求，返回增量生成器。支持 messages 参数（兼容 OpenAI tools）"""
+        url = f"{self.BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+        
+        params = {"bl": self.bl, "f.sid": "", "hl": "zh-CN", "_reqid": str(self.request_count * 100000 + random.randint(10000, 99999)), "rt": "c"}
+        
+        model_id = self.model_ids.get("flash", "56fdd199312815e2")
+        if model and "pro" in model.lower():
+            model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
+        
+        image_paths = []
+        if images:
+            for img in images:
+                img_data = base64.b64decode(img["data"])
+                image_paths.append(self._upload_image(img_data, img["mime_type"]))
+        
+        # 优先使用 messages，否则 fallback 到 text
+        if messages:
+            # 提取最后一条用户消息
+            last_user_msg = None
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    last_user_msg = m
+                    break
+            if last_user_msg:
+                content = last_user_msg.get("content", "")
+                if isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            text = item.get("text", "")
+                            break
+                else:
+                    text = str(content)
+        
+        req_data = self._build_request_data(text, images, image_paths, model)
+        form_data = {"f.req": req_data, "at": self.snlm0e}
+        model_headers = {"x-goog-ext-525001261-jspb": json.dumps([1,None,None,None,model_id,None,None,0,[4],None,None,2], separators=(',', ':'))}
+        
+        final_text = ""
+        
+        with self.session.stream("POST", url, params=params, data=form_data, headers=model_headers, timeout=60.0) as resp:
+            resp.raise_for_status()
+            self.request_count += 1
+            
+            for line in resp.iter_lines():
+                if not line or line.startswith(")]}'") or line.isdigit():
+                    continue
+                try:
+                    data = json.loads(line)
+                    if isinstance(data, list) and data[0] and len(data[0]) >= 3 and data[0][0] == "wrb.fr" and data[0][2]:
+                        inner = json.loads(data[0][2])
+                        if inner and len(inner) > 4 and inner[4]:
+                            cand = inner[4][0]
+                            if cand and len(cand) > 1 and cand[1]:
+                                content = cand[1][0] if isinstance(cand[1], list) else cand[1]
+                                if content and len(content) > len(final_text):
+                                    new_text = content[len(final_text):]
+                                    final_text = content
+                                    if inner[1]:
+                                        self.conversation_id = inner[1][0] or self.conversation_id
+                                    self.choice_id = cand[0] or self.choice_id
+                                    yield new_text
+                except:
+                    continue
 
 
 # OpenAI 兼容接口
