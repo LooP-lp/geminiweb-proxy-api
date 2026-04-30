@@ -1252,8 +1252,8 @@ def get_admin_html():
         .model-bar .name{width:180px;font-size:13px;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .model-bar .bar-bg{flex:1;height:20px;background:var(--surface-2);border-radius:10px;overflow:hidden;}
         .model-bar .bar-fill{height:100%;background:var(--blue);border-radius:10px;transition:width .3s ease;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:11px;color:#fff;min-width:24px;}
-.hourly-chart-wrap{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:8px;}
-.hourly-chart-wrap canvas{width:100%;height:180px;display:block;}
+.hourly-chart-wrap{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:8px;overflow:hidden;}
+.hourly-chart-wrap canvas{display:block;}
         .api-key-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--blue);word-break:break-all;}
         .base-url-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--green);margin-top:8px;word-break:break-all;}
         .model-tag{display:inline-block;background:var(--surface-2);color:var(--text);padding:6px 14px;border-radius:16px;font-size:12px;margin:4px;font-weight:500;}
@@ -2366,7 +2366,7 @@ if (!canvas) return;
 var dpr = window.devicePixelRatio || 1;
 var rect = canvas.parentElement.getBoundingClientRect();
 var W = rect.width - 32;
-var H = parseInt(canvas.getAttribute('height')) || 160;
+var H = parseInt(canvas.getAttribute('height')) || 180;
 canvas.width = W * dpr;
 canvas.height = H * dpr;
 canvas.style.width = W + 'px';
