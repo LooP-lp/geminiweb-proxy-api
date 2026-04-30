@@ -7,11 +7,17 @@ API:  http://localhost:7788/v1
 """
 
 import warnings
-warnings.filterwarnings('ignore')
+
+warnings.filterwarnings("ignore")
 
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
+    StreamingResponse,
+    JSONResponse,
+)
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Union
 import uvicorn
@@ -29,7 +35,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("API_KEY", "") # 从 .env 或环境变量读取
+API_KEY = os.getenv("API_KEY", "")  # 从 .env 或环境变量读取
 
 # ============ 配置 ============
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -39,12 +45,19 @@ CONFIG_FILE = os.getenv("CONFIG_FILE", "config_data.json")
 TOKEN_REFRESH_INTERVAL_MIN = int(os.getenv("TOKEN_REFRESH_INTERVAL_MIN", "200"))
 TOKEN_REFRESH_INTERVAL_MAX = int(os.getenv("TOKEN_REFRESH_INTERVAL_MAX", "300"))
 TOKEN_AUTO_REFRESH = os.getenv("TOKEN_AUTO_REFRESH", "true").lower() == "true"
-TOKEN_BACKGROUND_REFRESH = os.getenv("TOKEN_BACKGROUND_REFRESH", "true").lower() == "true"
+TOKEN_BACKGROUND_REFRESH = (
+    os.getenv("TOKEN_BACKGROUND_REFRESH", "true").lower() == "true"
+)
 MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", "http://127.0.0.1:7788")
 
 # 外部代理 API 配置
 EXTERNAL_API_URL = os.getenv("EXTERNAL_API_URL", "")
 EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY", "")
+EXTERNAL_API_URL_2 = os.getenv("EXTERNAL_API_URL_2", "")
+EXTERNAL_API_KEY_2 = os.getenv("EXTERNAL_API_KEY_2", "")
+EXTERNAL_API_URL_3 = os.getenv("EXTERNAL_API_URL_3", "")
+EXTERNAL_API_KEY_3 = os.getenv("EXTERNAL_API_KEY_3", "")
+EXTERNAL_API_KEY_4 = os.getenv("EXTERNAL_API_KEY_4", "")
 
 # 所有可用模型（Gemini 本地 + 外部代理）
 ALL_MODELS = [
@@ -55,10 +68,23 @@ ALL_MODELS = [
     "英伟达/deepseek-ai/deepseek-v4-pro",
     "英伟达/minimaxai/minimax-m2.7",
     "英伟达/z-ai/glm-5.1",
+    "英伟达/moonshotai/kimi-k2.5",
+    "gpt-5-mini",
+    "「hy-Kiro」claude-sonnet-4-5-20250929-thinking",
+    "grok-4.20-0309-non-reasoning",
+    "grok-imagine-image-lite",
 ]
 
 # 代理模型集合（请求这些模型时转发到外部 API）
-PROXY_MODELS = {"deepseek-v4-pro-search", "英伟达/deepseek-ai/deepseek-v4-pro", "英伟达/minimaxai/minimax-m2.7", "英伟达/z-ai/glm-5.1"}
+PROXY_MODELS = {
+    "deepseek-v4-pro-search",
+    "英伟达/z-ai/glm-5.1",
+    "英伟达/minimaxai/minimax-m2.7",
+    "英伟达/moonshotai/kimi-k2.5",
+}
+PROXY_MODELS_2 = {"gpt-5-mini"}
+PROXY_MODELS_3 = {"「hy-Kiro」claude-sonnet-4-5-20250929-thinking"}
+PROXY_MODELS_4 = {"grok-4.20-0309-non-reasoning", "grok-imagine-image-lite"}
 
 # ==============================
 
@@ -68,6 +94,7 @@ from datetime import datetime
 # 初始化数据库连接
 try:
     from db_manager import DBManager
+
     db = DBManager()
 except Exception as e:
     print(f"[WARN] 数据库连接失败: {e}，将使用内存模式")
@@ -98,6 +125,7 @@ from fastapi.responses import FileResponse
 MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "media_cache")
 os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
 
+
 @app.get("/static/{filename}")
 async def serve_static(filename: str):
     """提供静态文件（示例图片等）"""
@@ -106,34 +134,85 @@ async def serve_static(filename: str):
         return FileResponse(file_path)
     raise HTTPException(status_code=404, detail="文件不存在")
 
+
 @app.get("/media/{media_filename}")
 async def serve_media(media_filename: str):
     """提供缓存的媒体文件"""
     # 安全检查：只允许字母数字、下划线、点和常见后缀
     import re
-    if not re.match(r'^[a-zA-Z0-9_-]+(\.(png|jpg|jpeg|gif|webp|mp4))?$', media_filename):
+
+    if not re.match(
+        r"^[a-zA-Z0-9_-]+(\.(png|jpg|jpeg|gif|webp|mp4))?$", media_filename
+    ):
         raise HTTPException(status_code=400, detail="无效的媒体文件名")
-    
+
     # 直接查找文件（带后缀名）
     file_path = os.path.join(MEDIA_CACHE_DIR, media_filename)
     if os.path.exists(file_path):
         return FileResponse(file_path)
-    
+
     # 兼容旧版本：不带后缀名的请求，尝试查找匹配的文件
-    media_id = media_filename.rsplit('.', 1)[0] if '.' in media_filename else media_filename
+    media_id = (
+        media_filename.rsplit(".", 1)[0] if "." in media_filename else media_filename
+    )
     for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4"]:
         file_path = os.path.join(MEDIA_CACHE_DIR, media_id + ext)
         if os.path.exists(file_path):
             return FileResponse(file_path)
-    
+
     raise HTTPException(status_code=404, detail="媒体文件不存在")
+
+
+@app.get("/proxy_image")
+async def proxy_image(url: str):
+    """代理外部图片，解决 HTTPS 页面加载 HTTP 图片的混合内容问题"""
+    import hashlib
+    import re as _re
+
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 url 参数")
+    # 缓存到 media_cache
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+    # 先尝试从缓存查找
+    for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+        cached = os.path.join(MEDIA_CACHE_DIR, "proxy_" + url_hash + ext)
+        if os.path.exists(cached):
+            return FileResponse(cached)
+    # 下载
+    try:
+        async with httpx.AsyncClient(
+            timeout=30, follow_redirects=True, verify=False
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"代理下载失败: {e}")
+    # 检测类型
+    ct = resp.headers.get("content-type", "")
+    if "png" in ct or data[:8] == b"\\x89PNG\\r\\n\\x1a\\n":
+        ext = ".png"
+    elif "gif" in ct or data[:6] == b"GIF87a" or data[:6] == b"GIF89a":
+        ext = ".gif"
+    elif "webp" in ct or data[:4] == b"RIFF":
+        ext = ".webp"
+    elif "jpeg" in ct or "jpg" in ct or data[:2] == b"\\xff\\xd8":
+        ext = ".jpg"
+    else:
+        ext = ".png"
+    cached_path = os.path.join(MEDIA_CACHE_DIR, "proxy_" + url_hash + ext)
+    with open(cached_path, "wb") as f:
+        f.write(data)
+    return FileResponse(cached_path)
+
 
 def cleanup_old_media(max_age_hours: int = 1):
     """清理过期的媒体缓存文件"""
     import time
+
     now = time.time()
     max_age_seconds = max_age_hours * 3600
-    
+
     try:
         for filename in os.listdir(MEDIA_CACHE_DIR):
             file_path = os.path.join(MEDIA_CACHE_DIR, filename)
@@ -143,6 +222,7 @@ def cleanup_old_media(max_age_hours: int = 1):
                     os.remove(file_path)
     except Exception:
         pass
+
 
 # 存储有效的 session token
 _admin_sessions = set()
@@ -157,9 +237,19 @@ _stats = {
     "start_time": time.time(),
 }
 
+# 邮箱验证码缓存: {email: {"code": str, "expires": float, "last_sent": float}}
+_verify_codes = {}
+MAIL_API_KEY = "jodkwsxcyeqidadh"
+MAIL_API_URL = "https://api.mmp.cc/api/mail"
+EMAIL = "yijie6@foxmail.com"
+_VERIFY_CODE_COOLDOWN = 60  # 秒
+_VERIFY_CODE_EXPIRE = 300  # 5分钟
+
+
 def generate_session_token():
     """生成随机 session token"""
     return secrets.token_hex(32)
+
 
 def verify_admin_session(request: Request):
     """验证管理员 session"""
@@ -168,13 +258,14 @@ def verify_admin_session(request: Request):
         return False
     return True
 
+
 # 默认可用模型列表 (Gemini 3 官网三个模型: 快速/思考/Pro)
 DEFAULT_MODELS = ["gemini-3.0-flash", "gemini-3.0-flash-thinking", "gemini-3.1-pro"]
 
 # 默认模型 ID (用于请求头选择模型)
 DEFAULT_MODEL_IDS = {
     "flash": "fbb127bbb056c959",
-    "pro": "9d8ca3786ebdfbea", 
+    "pro": "9d8ca3786ebdfbea",
     "thinking": "5bf011840784117a",
 }
 
@@ -212,16 +303,16 @@ def parse_cookie_string(cookie_str: str) -> dict:
     result = {}
     if not cookie_str:
         return result
-    
+
     for item in cookie_str.split(";"):
         item = item.strip()
         if "=" in item:
             eq_index = item.index("=")
             key = item[:eq_index].strip()
-            value = item[eq_index + 1:].strip()
+            value = item[eq_index + 1 :].strip()
             if key in COOKIE_FIELD_MAP:
                 result[COOKIE_FIELD_MAP[key]] = value
-    
+
     return result
 
 
@@ -236,22 +327,22 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            }
+            },
         )
-        
+
         # 设置 cookies
         for item in cookies_str.split(";"):
             item = item.strip()
             if "=" in item:
                 key, value = item.split("=", 1)
                 session.cookies.set(key.strip(), value.strip(), domain=".google.com")
-        
+
         resp = session.get("https://gemini.google.com")
         if resp.status_code != 200:
             return result
-        
+
         html = resp.text
-        
+
         # 获取 SNLM0E (AT Token)
         snlm0e_patterns = [
             r'"SNlM0e":"([^"]+)"',
@@ -263,21 +354,21 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
             if match:
                 result["snlm0e"] = match.group(1)
                 break
-        
+
         # 获取 PUSH_ID
         push_id_patterns = [
             r'"push[_-]?id["\s:]+["\'](feeds/[a-z0-9]+)["\']',
             r'push[_-]?id["\s:=]+["\'](feeds/[a-z0-9]+)["\']',
             r'feedName["\s:]+["\'](feeds/[a-z0-9]+)["\']',
             r'clientId["\s:]+["\'](feeds/[a-z0-9]+)["\']',
-            r'(feeds/[a-z0-9]{14,})',
+            r"(feeds/[a-z0-9]{14,})",
         ]
         for pattern in push_id_patterns:
             matches = re.findall(pattern, html, re.IGNORECASE)
             if matches:
                 result["push_id"] = matches[0]
                 break
-        
+
         # 获取可用模型列表 (从页面中提取 gemini 模型 ID)
         model_patterns = [
             r'"(gemini-[a-z0-9\.\-]+)"',  # 匹配 "gemini-xxx" 格式
@@ -288,25 +379,27 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
             matches = re.findall(pattern, html, re.IGNORECASE)
             for m in matches:
                 # 过滤有效的模型名称
-                if any(x in m.lower() for x in ['flash', 'pro', 'ultra', 'nano']):
+                if any(x in m.lower() for x in ["flash", "pro", "ultra", "nano"]):
                     models_found.add(m)
-        
+
         if models_found:
             result["models"] = sorted(list(models_found))
-        
+
         # 获取模型 ID (用于 x-goog-ext-525001261-jspb 请求头)
         # 这些 ID 用于选择不同的模型版本
-        model_id_pattern = r'\["([a-f0-9]{16})","gemini[^"]*(?:flash|pro|thinking)[^"]*"\]'
+        model_id_pattern = (
+            r'\["([a-f0-9]{16})","gemini[^"]*(?:flash|pro|thinking)[^"]*"\]'
+        )
         model_ids = re.findall(model_id_pattern, html, re.IGNORECASE)
         if model_ids:
             result["model_ids"] = list(set(model_ids))
-        
+
         # 备用方案：直接搜索 16 位十六进制 ID（在模型配置附近）
         if not result.get("model_ids"):
             # 搜索类似 "56fdd199312815e2" 的模式
             hex_id_pattern = r'"([a-f0-9]{16})"'
             # 在包含 gemini 或 model 的上下文中查找
-            context_pattern = r'.{0,100}(?:gemini|model|flash|pro|thinking).{0,100}'
+            context_pattern = r".{0,100}(?:gemini|model|flash|pro|thinking).{0,100}"
             contexts = re.findall(context_pattern, html, re.IGNORECASE)
             hex_ids = set()
             for ctx in contexts:
@@ -314,10 +407,11 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
                 hex_ids.update(ids)
             if hex_ids:
                 result["model_ids"] = list(hex_ids)
-        
+
         return result
     except Exception:
         return result
+
 
 _client = None
 _last_token_refresh = 0  # 上次 token 刷新时间
@@ -327,29 +421,29 @@ _token_refresh_count = 0  # token 刷新次数统计
 def try_refresh_tokens(force: bool = False) -> dict:
     """
     尝试刷新 token
-    
+
     Args:
         force: 是否强制刷新，忽略时间间隔
-        
+
     Returns:
         dict: {"success": bool, "message": str, "snlm0e": str, "push_id": str}
     """
     global _client, _last_token_refresh, _token_refresh_count, _config
-    
+
     result = {"success": False, "message": "", "snlm0e": "", "push_id": ""}
-    
+
     if not TOKEN_AUTO_REFRESH and not force:
         result["message"] = "自动刷新已禁用"
         return result
-    
+
     current_time = time.time()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     # 检查是否需要刷新（除非强制刷新）
     if not force and (current_time - _last_token_refresh) < TOKEN_REFRESH_INTERVAL_MIN:
         result["message"] = f"距离上次刷新不足 {TOKEN_REFRESH_INTERVAL_MIN} 秒"
         return result
-    
+
     try:
         # 如果 client 存在，使用 client 的刷新方法
         if _client is not None:
@@ -362,15 +456,17 @@ def try_refresh_tokens(force: bool = False) -> dict:
                 if refresh_result["push_id"]:
                     _config["PUSH_ID"] = refresh_result["push_id"]
                     result["push_id"] = refresh_result["push_id"]
-                
+
                 # 保存配置
                 save_config()
-                
+
                 _last_token_refresh = current_time
                 _token_refresh_count += 1
                 result["success"] = True
                 result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
-                print(f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)")
+                print(
+                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
+                )
             else:
                 result["message"] = refresh_result.get("error", "刷新失败")
                 print(f"⚠️ [{now_str}] Token 刷新失败: {result['message']}")
@@ -381,7 +477,7 @@ def try_refresh_tokens(force: bool = False) -> dict:
                 cookies = f"__Secure-1PSID={_config.get('SECURE_1PSID', '')}"
                 if _config.get("SECURE_1PSIDTS"):
                     cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
-            
+
             tokens = fetch_tokens_from_page(cookies)
             if tokens.get("snlm0e"):
                 _config["SNLM0E"] = tokens["snlm0e"]
@@ -389,19 +485,21 @@ def try_refresh_tokens(force: bool = False) -> dict:
             if tokens.get("push_id"):
                 _config["PUSH_ID"] = tokens["push_id"]
                 result["push_id"] = tokens["push_id"]
-            
+
             if tokens.get("snlm0e"):
                 save_config()
                 _last_token_refresh = current_time
                 _token_refresh_count += 1
                 result["success"] = True
                 result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
-                print(f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)")
+                print(
+                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
+                )
             else:
                 result["message"] = "无法从页面获取新 token"
-        
+
         return result
-        
+
     except Exception as e:
         result["message"] = f"刷新异常: {str(e)}"
         print(f"❌ [{now_str}] Token 刷新异常: {e}")
@@ -450,7 +548,9 @@ def background_token_refresh_thread():
             result = try_refresh_tokens(force=True)
 
             if result["success"]:
-                print(f"✅ [{get_current_time_str()}] 后台刷新成功: {result['message']}")
+                print(
+                    f"✅ [{get_current_time_str()}] 后台刷新成功: {result['message']}"
+                )
             else:
                 print(f"⚠️ [{get_current_time_str()}] 后台刷新失败: {result['message']}")
 
@@ -473,11 +573,12 @@ async def startup_event():
     if TOKEN_BACKGROUND_REFRESH:
         _background_refresh_thread_stop = False
         _background_refresh_thread = threading.Thread(
-            target=background_token_refresh_thread,
-            daemon=True
+            target=background_token_refresh_thread, daemon=True
         )
         _background_refresh_thread.start()
-        print(f"✅ [{get_current_time_str()}] 后台 Token 定时刷新已启用（线程模式，间隔: {TOKEN_REFRESH_INTERVAL_MIN}-{TOKEN_REFRESH_INTERVAL_MAX} 秒随机）")
+        print(
+            f"✅ [{get_current_time_str()}] 后台 Token 定时刷新已启用（线程模式，间隔: {TOKEN_REFRESH_INTERVAL_MIN}-{TOKEN_REFRESH_INTERVAL_MAX} 秒随机）"
+        )
 
 
 @app.on_event("shutdown")
@@ -507,13 +608,21 @@ def build_tools_prompt(tools: List[Dict]) -> str:
     """将 tools 定义转换为提示词"""
     if not tools:
         return ""
-    
-    tools_schema = json.dumps([{
-        "name": t["function"]["name"],
-        "description": t["function"].get("description", ""),
-        "parameters": t["function"].get("parameters", {})
-    } for t in tools if t.get("type") == "function"], ensure_ascii=False, indent=2)
-    
+
+    tools_schema = json.dumps(
+        [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "parameters": t["function"].get("parameters", {}),
+            }
+            for t in tools
+            if t.get("type") == "function"
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
     prompt = f"""[系统指令] 你是一个遵循 OpenAI 工具调用协议的助手。
 
 当需要使用工具时，先在 <think> 标签中简要思考，然后输出工具调用 JSON。
@@ -544,15 +653,22 @@ def parse_tool_calls(content: str) -> tuple:
 
     # extract <think>...</think> or &#10094;...&#10095; thinking tags
     think_patterns = [
-        r'<think>(.*?)</think>',
-        r'\U0001f14d\U0001f14d(.*?)\U0001f14e\U0001f14e',
+        r"<thinking>(.*?)</thinking>",
+        r"<think>(.*?)</think>",
+        r"\u6df1\u611f>(.*?)\u6df1\u611f>",
+        r"<reasoning>(.*?)</reasoning>",
+        r"<reason>(.*?)</reason>",
+        r"<reflect>(.*?)</reflect>",
+        r"<reflection>(.*?)</reflection>",
+        r"<thought>(.*?)</thought>",
+        r"\U0001f14d\U0001f14d(.*?)\U0001f14e\U0001f14e",
     ]
     cleaned = content
     for pat in think_patterns:
         m = re.search(pat, cleaned, re.DOTALL)
         if m:
             thinking = m.group(1).strip()
-            cleaned = re.sub(pat, '', cleaned, flags=re.DOTALL).strip()
+            cleaned = re.sub(pat, "", cleaned, flags=re.DOTALL).strip()
             break
 
     def extract_json_blobs(text: str) -> List[str]:
@@ -584,7 +700,7 @@ def parse_tool_calls(content: str) -> tuple:
                     elif ch == "}":
                         depth -= 1
                         if depth == 0:
-                            blobs.append(text[start:j + 1])
+                            blobs.append(text[start : j + 1])
                             i = j + 1
                             break
             else:
@@ -595,7 +711,7 @@ def parse_tool_calls(content: str) -> tuple:
 
     # use cleaned content (without thinking tags) for tool parsing
     candidates_list = []
-    code_block_pattern = r'```(?:tool_call|json)?\s*\n?(.*?)\n?```'
+    code_block_pattern = r"```(?:tool_call|json)?\s*\n?(.*?)\n?```"
     candidates_list = re.findall(code_block_pattern, cleaned, re.DOTALL)
     if not candidates_list:
         candidates_list = [cleaned]
@@ -611,20 +727,24 @@ def parse_tool_calls(content: str) -> tuple:
             except json.JSONDecodeError:
                 continue
             if isinstance(call_data, dict) and call_data.get("name"):
-                tool_calls.append({
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": call_data.get("name", ""),
-                        "arguments": json.dumps(call_data.get("arguments", {}), ensure_ascii=False)
+                tool_calls.append(
+                    {
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": call_data.get("name", ""),
+                            "arguments": json.dumps(
+                                call_data.get("arguments", {}), ensure_ascii=False
+                            ),
+                        },
                     }
-                })
+                )
 
     remaining = cleaned
     for blob in seen:
         remaining = remaining.replace(blob, "")
-    remaining = re.sub(r'```(?:tool_call|json)?\s*', '', remaining)
-    remaining = remaining.replace('```', '')
+    remaining = re.sub(r"```(?:tool_call|json)?\s*", "", remaining)
+    remaining = remaining.replace("```", "")
     remaining = remaining.strip()
 
     return tool_calls, remaining, thinking
@@ -638,7 +758,7 @@ def load_config():
     """
     global _config
     loaded_from_json = False
-    
+
     # 优先从 JSON 文件加载
     if os.path.exists(CONFIG_FILE):
         try:
@@ -649,11 +769,12 @@ def load_config():
                     loaded_from_json = True
         except:
             pass
-    
+
     # 如果 JSON 没有有效配置，尝试从 config.py 加载
     if not loaded_from_json:
         try:
             import config
+
             for key in _config:
                 if hasattr(config, key) and getattr(config, key):
                     _config[key] = getattr(config, key)
@@ -671,22 +792,24 @@ def get_client(auto_refresh: bool = True):
 
     if not _config.get("SNLM0E") or not _config.get("SECURE_1PSID"):
         raise HTTPException(status_code=500, detail="请先在后台配置 Token 和 Cookie")
-    
+
     # 检查是否需要自动刷新 token
     if auto_refresh and TOKEN_AUTO_REFRESH:
         current_time = time.time()
         if (current_time - _last_token_refresh) >= TOKEN_REFRESH_INTERVAL_MIN:
             try_refresh_tokens()
-    
+
     # 如果 client 已存在，直接复用，保持会话上下文
     if _client is not None:
         return _client
-    
+
     cookies = f"__Secure-1PSID={_config['SECURE_1PSID']}"
     if _config.get("SECURE_1PSIDTS"):
         cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
     if _config.get("SAPISID"):
-        cookies += f"; SAPISID={_config['SAPISID']}; __Secure-1PAPISID={_config['SAPISID']}"
+        cookies += (
+            f"; SAPISID={_config['SAPISID']}; __Secure-1PAPISID={_config['SAPISID']}"
+        )
     if _config.get("SID"):
         cookies += f"; SID={_config['SID']}"
     if _config.get("HSID"):
@@ -695,11 +818,12 @@ def get_client(auto_refresh: bool = True):
         cookies += f"; SSID={_config['SSID']}"
     if _config.get("APISID"):
         cookies += f"; APISID={_config['APISID']}"
-    
+
     # 构建媒体文件的基础 URL (优先使用配置的外网地址)
     media_base_url = MEDIA_BASE_URL if MEDIA_BASE_URL else f"http://localhost:{PORT}"
-    
+
     from client import GeminiClient
+
     _client = GeminiClient(
         secure_1psid=_config["SECURE_1PSID"],
         snlm0e=_config["SNLM0E"],
@@ -713,7 +837,7 @@ def get_client(auto_refresh: bool = True):
 
 
 def get_login_html():
-    return '''<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -722,11 +846,19 @@ def get_login_html():
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh;
             display: flex; align-items: center; justify-content: center; padding: 20px; }
-        .login-card { background: white; border-radius: 16px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 100%; max-width: 400px; }
+        .login-card { background: white; border-radius: 16px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 100%; max-width: 420px; }
+        .ip-info { margin-top: 24px; border-radius: 10px; overflow: hidden; border: 1px solid #e0e0e0; }
+        .ip-info img { width: 100%; height: auto; display: block; }
         h1 { color: #333; margin-bottom: 10px; font-size: 28px; text-align: center; }
-        .subtitle { color: #666; margin-bottom: 30px; font-size: 14px; text-align: center; }
+        .subtitle { color: #666; margin-bottom: 20px; font-size: 14px; text-align: center; }
+        .tabs { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 2px solid #e0e0e0; }
+        .tab { flex: 1; text-align: center; padding: 10px; cursor: pointer; font-size: 15px; font-weight: 500; color: #999; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab.active { color: #667eea; border-bottom-color: #667eea; }
+        .tab:hover { color: #667eea; }
+        .form-panel { display: none; }
+        .form-panel.active { display: block; }
         .form-group { margin-bottom: 20px; }
         label { display: block; font-size: 13px; font-weight: 500; color: #555; margin-bottom: 8px; }
         input { width: 100%; padding: 14px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 15px; transition: border-color 0.2s; }
@@ -735,73 +867,227 @@ def get_login_html():
             border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; transition: transform 0.2s, box-shadow 0.2s; }
         .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102,126,234,0.4); }
         .btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+        .btn-secondary { background: #f0f0f0; color: #555; border: 1px solid #ddd; padding: 12px 20px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+        .btn-secondary:hover { background: #e5e5e5; }
+        .btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
+        .code-row { display: flex; gap: 10px; }
+        .code-row input { flex: 1; }
+        .code-row .btn-secondary { width: 120px; margin-top: 0; flex-shrink: 0; }
         .error { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 14px; display: none; }
+        .success { background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 14px; display: none; }
         .logo { text-align: center; margin-bottom: 20px; font-size: 48px; }
     </style>
 </head>
 <body>
     <div class="login-card">
-        <div class="logo">🤖</div>
+        <div class="logo">\U0001f916</div>
         <h1>Gemini API</h1>
-        <p class="subtitle">请登录以访问后台管理</p>
-        
+        <p class="subtitle">\u8bf7\u767b\u5f55\u6216\u6ce8\u518c\u4ee5\u8bbf\u95ee\u540e\u53f0\u7ba1\u7406</p>
+
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('login')">\u767b \u5f55</div>
+            <div class="tab" onclick="switchTab('register')">\u6ce8 \u518c</div>
+        </div>
+
         <div id="error" class="error"></div>
-        
-        <form id="loginForm">
-            <div class="form-group">
-                <label>用户名</label>
-                <input type="text" name="username" id="username" placeholder="请输入用户名" required autofocus>
+        <div id="success" class="success"></div>
+
+        <div id="panel-login" class="form-panel active">
+            <form id="loginForm">
+                <div class="form-group">
+                    <label>\u7528\u6237\u540d</label>
+                    <input type="text" name="username" id="loginUsername" placeholder="\u8bf7\u8f93\u5165\u7528\u6237\u540d" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label>\u5bc6\u7801</label>
+                    <input type="password" name="password" id="loginPassword" placeholder="\u8bf7\u8f93\u5165\u5bc6\u7801" required>
+                </div>
+                <button type="submit" class="btn" id="loginBtn">\u767b \u5f55</button>
+            </form>
+        </div>
+
+        <div id="panel-register" class="form-panel">
+            <form id="registerForm">
+                <div class="form-group">
+                    <label>\u7528\u6237\u540d</label>
+                    <input type="text" name="username" id="regUsername" placeholder="\u8bf7\u8f93\u5165\u7528\u6237\u540d" required>
+                </div>
+                <div class="form-group">
+                    <label>\u90ae\u7bb1</label>
+                    <input type="email" name="email" id="regEmail" placeholder="\u8bf7\u8f93\u5165\u90ae\u7bb1" required>
+                </div>
+                <div class="form-group">
+                    <label>\u5bc6\u7801</label>
+                    <input type="password" name="password" id="regPassword" placeholder="\u8bf7\u8f93\u5165\u5bc6\u7801\uff08\u81f3\u5c116\u4f4d\uff09" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label>\u9a8c\u8bc1\u7801</label>
+                    <div class="code-row">
+                        <input type="text" name="code" id="regCode" placeholder="6\u4f4d\u9a8c\u8bc1\u7801" required maxlength="6">
+                        <button type="button" class="btn-secondary" id="sendCodeBtn" onclick="sendVerifyCode()">\u53d1\u9001\u9a8c\u8bc1\u7801</button>
+                    </div>
+                </div>
+        <button type="submit" class="btn" id="registerBtn">\u6ce8 \u518c</button>
+            </form>
             </div>
-            <div class="form-group">
-                <label>密码</label>
-                <input type="password" name="password" id="password" placeholder="请输入密码" required>
+
+            <div class="ip-info">
+                <img src="https://ping0.cc/img1" alt="IP Info" loading="lazy" onerror="this.parentElement.style.display='none'">
             </div>
-            <button type="submit" class="btn" id="submitBtn">登 录</button>
-        </form>
-    </div>
-    
+        </div>
+
     <script>
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+            document.querySelectorAll('.form-panel').forEach(function(p) { p.classList.remove('active'); });
+            document.querySelector('.tab[onclick*="' + tab + '"]').classList.add('active');
+            document.getElementById('panel-' + tab).classList.add('active');
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('success').style.display = 'none';
+        }
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const errorEl = document.getElementById('error');
-            const submitBtn = document.getElementById('submitBtn');
-            
+            const successEl = document.getElementById('success');
+            const loginBtn = document.getElementById('loginBtn');
+
             errorEl.style.display = 'none';
-            submitBtn.disabled = true;
-            submitBtn.textContent = '登录中...';
-            
+            successEl.style.display = 'none';
+            loginBtn.disabled = true;
+            loginBtn.textContent = '\u767b\u5f55\u4e2d...';
+
             try {
                 const resp = await fetch('/admin/login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        username: document.getElementById('username').value,
-                        password: document.getElementById('password').value
+                        username: document.getElementById('loginUsername').value,
+                        password: document.getElementById('loginPassword').value
                     })
                 });
                 const result = await resp.json();
-                
+
                 if (result.success) {
                     window.location.href = '/admin';
                 } else {
-                    errorEl.textContent = result.message || '登录失败';
+                    errorEl.textContent = result.message || '\u767b\u5f55\u5931\u8d25';
                     errorEl.style.display = 'block';
                 }
             } catch (err) {
-                errorEl.textContent = '网络错误: ' + err.message;
+                errorEl.textContent = '\u7f51\u7edc\u9519\u8bef: ' + err.message;
                 errorEl.style.display = 'block';
             } finally {
-                submitBtn.disabled = false;
-                submitBtn.textContent = '登 录';
+                loginBtn.disabled = false;
+                loginBtn.textContent = '\u767b \u5f55';
+            }
+        });
+
+        var countdownTimer = null;
+
+        async function sendVerifyCode() {
+            var btn = document.getElementById('sendCodeBtn');
+            var email = document.getElementById('regEmail').value.trim();
+            var errorEl = document.getElementById('error');
+            var successEl = document.getElementById('success');
+            errorEl.style.display = 'none';
+            successEl.style.display = 'none';
+
+            if (!email || email.indexOf('@') === -1) {
+                errorEl.textContent = '\u8bf7\u8f93\u5165\u6709\u6548\u90ae\u7bb1';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            btn.disabled = true;
+            var sec = 60;
+            btn.textContent = sec + 's\u540e\u91cd\u53d1';
+            countdownTimer = setInterval(function() {
+                sec--;
+                if (sec <= 0) {
+                    clearInterval(countdownTimer);
+                    btn.disabled = false;
+                    btn.textContent = '\u53d1\u9001\u9a8c\u8bc1\u7801';
+                } else {
+                    btn.textContent = sec + 's\u540e\u91cd\u53d1';
+                }
+            }, 1000);
+
+            try {
+                var resp = await fetch('/admin/send-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: email})
+                });
+                var result = await resp.json();
+                if (result.success) {
+                    successEl.textContent = result.message;
+                    successEl.style.display = 'block';
+                } else {
+                    errorEl.textContent = result.message;
+                    errorEl.style.display = 'block';
+                    clearInterval(countdownTimer);
+                    btn.disabled = false;
+                    btn.textContent = '\u53d1\u9001\u9a8c\u8bc1\u7801';
+                }
+            } catch (err) {
+                errorEl.textContent = '\u53d1\u9001\u5931\u8d25: ' + err.message;
+                errorEl.style.display = 'block';
+                clearInterval(countdownTimer);
+                btn.disabled = false;
+                btn.textContent = '\u53d1\u9001\u9a8c\u8bc1\u7801';
+            }
+        }
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            var errorEl = document.getElementById('error');
+            var successEl = document.getElementById('success');
+            var registerBtn = document.getElementById('registerBtn');
+
+            errorEl.style.display = 'none';
+            successEl.style.display = 'none';
+            registerBtn.disabled = true;
+            registerBtn.textContent = '\u6ce8\u518c\u4e2d...';
+
+            try {
+                var resp = await fetch('/admin/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: document.getElementById('regUsername').value,
+                        password: document.getElementById('regPassword').value,
+                        email: document.getElementById('regEmail').value,
+                        code: document.getElementById('regCode').value
+                    })
+                });
+                var result = await resp.json();
+
+                if (result.success) {
+                    successEl.textContent = result.message;
+                    successEl.style.display = 'block';
+                    clearInterval(countdownTimer);
+                    setTimeout(function() { switchTab('login'); }, 1500);
+                } else {
+                    errorEl.textContent = result.message || '\u6ce8\u518c\u5931\u8d25';
+                    errorEl.style.display = 'block';
+                }
+            } catch (err) {
+                errorEl.textContent = '\u7f51\u7edc\u9519\u8bef: ' + err.message;
+                errorEl.style.display = 'block';
+            } finally {
+                registerBtn.disabled = false;
+                registerBtn.textContent = '\u6ce8 \u518c';
             }
         });
     </script>
 </body>
-</html>'''
+</html>"""
 
 
 def get_admin_html():
-    return '''<!DOCTYPE html>
+    return (
+        """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -874,20 +1160,35 @@ def get_admin_html():
         .chat-header select:hover{background-color:rgba(0,0,0,0.04);[data-theme="dark"] &{background-color:rgba(255,255,255,0.08);}}
         .chat-shell{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg);}
         .chat-messages{flex:1;min-height:0;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px;}
-        .msg{max-width:75%;padding:12px 16px;border-radius:18px;font-size:14px;line-height:1.6;position:relative;word-wrap:break-word;white-space:pre-wrap;}
-        .msg .msg-time{font-size:11px;margin-top:6px;opacity:.7;display:block;}
-        .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:4px;}
-        .msg.user .msg-time{color:rgba(255,255,255,.7);}
-        .msg.assistant{align-self:flex-start;background:var(--surface);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:4px;}
+.msg{max-width:85%;padding:12px 16px;border-radius:18px;font-size:14px;line-height:1.6;position:relative;word-wrap:break-word;white-space:pre-wrap;}
+.msg .msg-time{font-size:11px;margin-top:6px;opacity:.7;display:block;}
+.msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:4px;}
+.msg.user .msg-time{color:rgba(255,255,255,.7);}
+.msg.user .msg-actions{display:flex;gap:6px;margin-top:6px;}
+.msg.user .msg-actions button{background:rgba(255,255,255,.15);color:rgba(255,255,255,.8);border:none;padding:3px 10px;border-radius:10px;font-size:11px;cursor:pointer;transition:all .15s;}
+.msg.user .msg-actions button:hover{background:rgba(255,255,255,.3);color:#fff;}
+.msg.assistant{align-self:flex-start;background:var(--surface);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:4px;}
+.msg.assistant .inline-spinner{display:inline-block;width:14px;height:14px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));mask:radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));animation:spin .8s linear infinite;vertical-align:middle;margin-left:8px;}
         .msg.assistant pre{background:var(--bg);padding:12px;border-radius:8px;overflow-x:auto;margin:8px 0;font-size:13px;border:1px solid var(--border);}
         .msg.assistant code{font-family:'SF Mono',Consolas,monospace;font-size:13px;}
         .msg.assistant code:not(pre code){background:var(--surface-2);padding:2px 5px;border-radius:4px;}
         .msg.assistant ul,.msg.assistant ol{padding-left:20px;margin:6px 0;}
         .msg.assistant li{margin:3px 0;}
-        .msg.assistant strong{color:var(--blue);}
-        .msg.assistant em{color:var(--green);}
-.msg.thinking{display:flex;justify-content:center;align-items:center;gap:8px;padding:20px;color:var(--muted);font-size:14px;}
-.msg.thinking::before{content:'';display:inline-block;width:20px;height:20px;border-radius:50%;background:conic-gradient(#4285f4 0 25%, #ea4335 25% 50%, #fbbc04 50% 75%, #34a853 75% 100%);-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));animation:spin .8s linear infinite;}
+.msg.assistant strong{color:var(--blue);}
+.msg.assistant em{color:var(--green);}
+.msg.assistant .ai-img-wrap{margin:8px 0;border-radius:12px;overflow:hidden;display:inline-block;max-width:100%;}
+.msg.assistant .ai-img-wrap .ai-img{max-width:320px;max-height:320px;border-radius:12px;cursor:pointer;display:block;transition:transform .2s,box-shadow .2s;object-fit:contain;}
+.msg.assistant .ai-img-wrap .ai-img:hover{transform:scale(1.02);box-shadow:0 4px 16px rgba(0,0,0,.15);}
+.msg.assistant .ai-img-wrap .ai-img-actions{margin-top:4px;display:flex;gap:8px;}
+.msg.assistant .ai-img-wrap .ai-img-hint{font-size:11px;color:var(--muted);cursor:pointer;margin-top:2px;}
+
+.img-lightbox{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:2000;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .25s;}
+.img-lightbox.active{opacity:1;pointer-events:auto;}
+.img-lightbox img{max-width:92vw;max-height:88vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.4);object-fit:contain;}
+.img-lightbox .lb-close{position:absolute;top:16px;right:20px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.15);color:#fff;border:none;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
+.img-lightbox .lb-close:hover{background:rgba(255,255,255,.3);}
+
+.msg.thinking{display:none;}
 .thinking-block{margin-bottom:8px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface-2);}
 .thinking-toggle{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;font-size:12px;color:var(--muted);user-select:none;transition:background .15s;}
 .thinking-toggle:hover{background:rgba(0,0,0,.04);}
@@ -899,6 +1200,14 @@ def get_admin_html():
         @keyframes spin{to{transform:rotate(360deg);}}
         /* === Chat Input === */
         .chat-input-area{padding:12px 20px;border-top:1px solid var(--border);background:var(--surface);transition:background .3s,border-color .3s;}
+.prompt-bar{display:flex;align-items:center;gap:6px;padding:0 0 6px 0;flex-wrap:wrap;}
+.prompt-bar select{background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:4px 8px;font-size:12px;border-radius:14px;outline:none;cursor:pointer;max-width:200px;}
+.prompt-bar select:hover{border-color:var(--blue);}
+.prompt-bar .prompt-tag{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--border);padding:3px 10px;border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;transition:all .15s;}
+.prompt-bar .prompt-tag:hover{border-color:var(--blue);color:var(--blue);}
+.prompt-bar .prompt-tag.active{background:rgba(26,115,232,.1);border-color:var(--blue);color:var(--blue);}
+.prompt-bar .prompt-action{background:none;border:1px dashed var(--border);padding:3px 10px;border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;}
+.prompt-bar .prompt-action:hover{border-color:var(--blue);color:var(--blue);}
         .chat-input-wrap{display:flex;align-items:flex-end;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:24px;padding:8px 12px;}
         .chat-input-wrap:focus-within{border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,115,232,.2);}
         .attach-btn{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:6px;border-radius:50%;transition:all .15s;}
@@ -910,8 +1219,19 @@ def get_admin_html():
         .img-preview-area{display:flex;gap:8px;padding:0 0 8px 0;flex-wrap:wrap;}
         .img-preview-item{position:relative;width:56px;height:56px;border-radius:12px;overflow:hidden;border:1px solid var(--border);background:var(--surface);}
         .img-preview-item img{width:100%;height:100%;object-fit:cover;}
-        .img-preview-item .remove-img{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.6);color:#fff;border:none;width:18px;height:18px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-        /* === Console === */
+.img-preview-item .remove-img{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.6);color:#fff;border:none;width:18px;height:18px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.prompt-editor-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:1000;display:flex;align-items:center;justify-content:center;}
+.prompt-editor-modal .modal-box{background:var(--surface);border-radius:16px;padding:24px;width:500px;max-width:90vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);}
+.prompt-editor-modal .modal-box h3{margin:0 0 16px 0;font-size:18px;}
+.prompt-editor-modal .modal-box input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--input-bg);color:var(--text);font-size:14px;margin-bottom:12px;outline:none;}
+.prompt-editor-modal .modal-box input:focus{border-color:var(--blue);}
+.prompt-editor-modal .modal-box textarea{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--input-bg);color:var(--text);font-size:13px;font-family:'SF Mono',Consolas,monospace;min-height:200px;resize:vertical;outline:none;line-height:1.5;}
+.prompt-editor-modal .modal-box textarea:focus{border-color:var(--blue);}
+.prompt-editor-modal .modal-box .modal-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
+.prompt-editor-modal .modal-box .modal-btns button{padding:8px 20px;border-radius:10px;border:none;font-size:14px;cursor:pointer;}
+.prompt-editor-modal .modal-box .btn-primary{background:var(--blue);color:#fff;}
+.prompt-editor-modal .modal-box .btn-secondary{background:var(--surface-2);color:var(--text);border:1px solid var(--border);}
+/* === Console === */
         .console-wrap{flex:1;overflow-y:auto;padding:20px;}
         .console-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;}
         .console-action{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:20px;font-size:13px;cursor:pointer;font-weight:500;transition:all .15s ease;}
@@ -932,6 +1252,8 @@ def get_admin_html():
         .model-bar .name{width:180px;font-size:13px;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .model-bar .bar-bg{flex:1;height:20px;background:var(--surface-2);border-radius:10px;overflow:hidden;}
         .model-bar .bar-fill{height:100%;background:var(--blue);border-radius:10px;transition:width .3s ease;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;font-size:11px;color:#fff;min-width:24px;}
+.hourly-chart-wrap{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:8px;}
+.hourly-chart-wrap canvas{width:100%;height:180px;display:block;}
         .api-key-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--blue);word-break:break-all;}
         .base-url-display{font-family:'SF Mono',monospace;font-size:13px;background:var(--surface-2);padding:12px 16px;border-radius:12px;color:var(--green);margin-top:8px;word-break:break-all;}
         .model-tag{display:inline-block;background:var(--surface-2);color:var(--text);padding:6px 14px;border-radius:16px;font-size:12px;margin:4px;font-weight:500;}
@@ -950,6 +1272,22 @@ def get_admin_html():
         .api-key-item .key-btn:hover{border-color:var(--blue);color:var(--blue);}
         .api-key-item .key-btn.delete{border-color:var(--red);color:var(--red);}
         .api-key-item .key-btn.delete:hover{background:var(--red);color:#fff;}
+.user-card{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:var(--surface-2);border-radius:12px;margin-bottom:8px;cursor:pointer;transition:all .15s;}
+.user-card:hover{background:var(--surface-2);box-shadow:0 2px 8px rgba(0,0,0,.06);}
+.user-card .user-info{flex:1;}
+.user-card .user-name{font-size:15px;font-weight:600;color:var(--text);}
+.user-card .user-meta{font-size:12px;color:var(--muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;}
+.user-card .user-actions{display:flex;gap:8px;align-items:center;}
+.user-detail-panel{background:var(--surface-2);border-radius:16px;padding:24px;margin-top:16px;}
+.user-detail-panel h3{margin:0 0 16px 0;font-size:18px;}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+.detail-item{background:var(--surface);padding:12px 16px;border-radius:10px;}
+.detail-item .label{font-size:12px;color:var(--muted);margin-bottom:4px;}
+.detail-item .value{font-size:16px;font-weight:600;color:var(--text);}
+.user-key-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.user-key-row:last-child{border-bottom:none;}
+.back-btn{background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:10px;cursor:pointer;font-size:13px;margin-bottom:12px;}
+.back-btn:hover{border-color:var(--blue);color:var(--blue);}
         .create-key-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 20px;border:2px dashed var(--border);border-radius:12px;background:none;width:100%;cursor:pointer;color:var(--muted);font-size:14px;transition:all .15s;}
         .create-key-btn:hover{border-color:var(--blue);color:var(--blue);background:rgba(26,115,232,.04);}
         /* === Config === */
@@ -1060,11 +1398,13 @@ def get_admin_html():
     </div>
     <div class="sidebar">
         <div class="sidebar-logo">&#129302; Gemini API</div>
-        <div class="sidebar-nav">
-            <div class="nav-item active" onclick="switchTab('chat')"><span class="icon">&#128172;</span><span class="label">对话</span></div>
-            <div class="nav-item" onclick="switchTab('console')"><span class="icon">&#128202;</span><span class="label">控制台</span></div>
-            <div class="nav-item" onclick="switchTab('config')"><span class="icon">&#9881;&#65039;</span><span class="label">配置</span></div>
-        </div>
+<div class="sidebar-nav">
+<div class="nav-item active" onclick="switchTab('chat')"><span class="icon">&#128172;</span><span class="label">对话</span></div>
+<div class="nav-item" onclick="switchTab('console')"><span class="icon">&#128187;</span><span class="label">控制台</span></div>
+<div class="nav-item" onclick="switchTab('stats')"><span class="icon">&#128202;</span><span class="label">统计</span></div>
+<div class="nav-item" onclick="switchTab('users')"><span class="icon">&#128101;</span><span class="label">用户</span></div>
+<div class="nav-item" onclick="switchTab('config')"><span class="icon">&#9881;&#65039;</span><span class="label">配置</span></div>
+</div>
         <div class="sidebar-footer">
             <a href="#" onclick="toggleTheme();return false;" id="themeToggle">&#127769; <span>深色模式</span></a>
             <a href="/admin/logout">&#128682; <span>退出登录</span></a>
@@ -1080,8 +1420,13 @@ def get_admin_html():
                     <span id="tokenBadge" class="token-badge loading">检查中...</span>
                 </div>
                 <div class="chat-messages" id="chatMessages"></div>
-                <div class="chat-input-area">
-                    <div class="img-preview-area" id="imgPreview"></div>
+<div class="chat-input-area">
+<div class="prompt-bar" id="promptBar">
+<span style="font-size:11px;color:var(--muted);margin-right:2px;">Prompt:</span>
+<select id="promptSelect" onchange="onPromptChange()"><option value="">(none)</option></select>
+<button class="prompt-action" onclick="openPromptEditor('prompt')">+&#9998;</button>
+</div>
+<div class="img-preview-area" id="imgPreview"></div>
                     <div class="chat-input-wrap">
                         <button class="attach-btn" onclick="document.getElementById('fileInput').click()" title="上传图片">&#128206;</button>
                         <input type="file" id="fileInput" accept="image/jpeg,image/png,image/gif,image/webp" multiple style="display:none;" onchange="handleFiles(this.files)">
@@ -1091,64 +1436,53 @@ def get_admin_html():
                 </div>
             </div>
         </div>
-        <!-- Console Tab -->
-        <div id="tab-console" class="tab-content">
-            <div class="console-wrap">
-                <div class="console-toolbar">
-                    <button class="console-action" onclick="refreshConsoleData()">&#128260; 刷新数据</button>
-                    <button class="console-action" onclick="refreshTokenNow()">&#128259; 刷新 Token</button>
-                    <button class="console-action" onclick="resetClientNow()">&#128260; 重置 Client</button>
-                    <button class="console-action" onclick="exportConsoleData()">&#128229; 导出统计</button>
-                    <button class="console-action" onclick="clearChatHistory()">&#128465; 清空对话</button>
-                </div>
-                <div class="stats-grid" id="statsGrid">
-                    <div class="stat-card"><div class="label">总请求数</div><div class="value" id="statReqs">-</div><div class="sub">今日 <span id="statTodayReqs">0</span></div></div>
-                    <div class="stat-card"><div class="label">总 Token</div><div class="value" id="statTokens">-</div><div class="sub">今日 <span id="statTodayTokens">0</span></div></div>
-                    <div class="stat-card"><div class="label">Prompt Tokens</div><div class="value" id="statPrompt">-</div></div>
-                    <div class="stat-card"><div class="label">Completion</div><div class="value" id="statCompletion">-</div></div>
-                </div>
-                <div class="stats-grid-2">
-                    <div class="stat-card"><div class="label">运行时间</div><div class="value" id="statUptime" style="font-size:18px;">-</div></div>
-                    <div class="stat-card"><div class="label">刷新次数</div><div class="value" id="statRefresh">-</div></div>
-                    <div class="stat-card"><div class="label">后台刷新</div><div class="value" id="statBackground" style="font-size:18px;">-</div></div>
-                    <div class="stat-card"><div class="label">Client</div><div class="value" id="statClient" style="font-size:18px;">-</div></div>
-                </div>
-                <div class="console-section">
-                    <h3>&#128202; 模型使用分布</h3>
-                    <div id="modelUsageChart"><span style="color:var(--muted);">暂无数据</span></div>
-                </div>
-                <div class="console-section">
-                    <h3>&#128273; 我的 API Keys</h3>
-                    <div style="margin-bottom:12px;">
-                        <div class="metric-row"><div class="k">接口地址</div><div class="v" id="dispBaseUrl"></div></div>
-                    </div>
-                    <div id="apiKeysList" class="api-key-list">
-                        <span style="color:var(--muted);font-size:13px;">加载中...</span>
-                    </div>
-                    <button class="create-key-btn" onclick="showCreateKeyModal()" style="margin-top:12px;">
-                        &#43; 创建新的 API Key
-                    </button>
-                </div>
-                <div class="console-section">
-                    <h3>&#128640; 可用模型</h3>
-                    <div id="modelsList" style="margin-top:8px;"><span style="color:var(--muted);">加载中...</span></div>
-                </div>
-                <div class="console-section">
-                    <h3>&#129408; Rust 对接文档</h3>
-                    <div class="rust-code" id="rustCode"></div>
-                </div>
-                <div class="console-section">
-                    <h3>&#128221; 最近运行信息</h3>
-                    <div class="metric-list">
-                        <div class="metric-row"><div class="k">Token 自动刷新</div><div class="v" id="statAutoRefresh">-</div></div>
-                        <div class="metric-row"><div class="k">后台定时刷新</div><div class="v" id="statBgRefresh">-</div></div>
-                        <div class="metric-row"><div class="k">当前模型数量</div><div class="v" id="statModelCount">-</div></div>
-                        <div class="metric-row"><div class="k">更新时间</div><div class="v" id="statUpdatedAt">-</div></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <!-- Config Tab -->
+<!-- Console Tab -->
+<div id="tab-console" class="tab-content">
+<div class="console-wrap">
+<div class="console-section">
+<h3>&#128202; API 数据</h3>
+<div style="display:flex;gap:16px;">
+<div style="flex:1;min-width:0;">
+<h4 style="font-size:13px;color:var(--muted);margin-bottom:12px;">24小时模型使用分布</h4>
+<div class="hourly-chart-wrap"><canvas id="userModelBarChart" height="200"></canvas></div>
+</div>
+<div style="flex:1;min-width:0;">
+<h4 style="font-size:13px;color:var(--muted);margin-bottom:12px;">24小时 Token 消耗</h4>
+<div class="hourly-chart-wrap"><canvas id="userTokenLineChart" height="200"></canvas></div>
+</div>
+</div>
+</div>
+<div class="console-section">
+<h3>&#128273; 我的 API Keys</h3>
+<div style="margin-bottom:12px;">
+<div class="metric-row"><div class="k">接口地址</div><div class="v" id="dispBaseUrl"></div></div>
+</div>
+<div id="apiKeysList" class="api-key-list">
+<span style="color:var(--muted);font-size:13px;">加载中...</span>
+</div>
+<button class="create-key-btn" onclick="showCreateKeyModal()" style="margin-top:12px;">
+&#43; 创建新的 API Key
+</button>
+</div>
+<div class="console-section">
+<h3>&#128640; 可用模型</h3>
+<div id="modelsList" style="margin-top:8px;"><span style="color:var(--muted);">加载中...</span></div>
+</div>
+<div class="console-section">
+<h3>&#129408; Rust 对接文档</h3>
+<div class="rust-code" id="rustCode"></div>
+</div>
+</div>
+</div>
+<!-- Users Tab -->
+<div id="tab-users" class="tab-content">
+<div class="console-wrap">
+<h2 style="font-size:22px;margin-bottom:20px;">&#128101; 用户管理</h2>
+<div id="usersList"></div>
+<div id="userDetail" style="display:none;"></div>
+</div>
+</div>
+<!-- Config Tab -->
         <div id="tab-config" class="tab-content">
             <div class="config-wrap">
                 <div class="config-card">
@@ -1203,11 +1537,55 @@ def get_admin_html():
                     </form>
                     <div id="cfgStatus" class="status-msg"></div>
                 </div>
-            </div>
-        </div>
-    </div>
+</div>
+</div>
+<!-- Stats Tab -->
+<div id="tab-stats" class="tab-content">
+<div class="console-wrap">
+<div class="console-toolbar" id="statsToolbar">
+<button class="console-action" onclick="loadStatsData()">&#128260; 刷新数据</button>
+<button class="console-action admin-only-btn" onclick="refreshTokenNow()">&#128259; 刷新 Token</button>
+<button class="console-action admin-only-btn" onclick="resetClientNow()">&#128260; 重置 Client</button>
+</div>
+<div class="stats-grid" id="statsGrid">
+<div class="stat-card"><div class="label">总请求数</div><div class="value" id="statReqs">-</div><div class="sub">今日 <span id="statTodayReqs">0</span></div></div>
+<div class="stat-card"><div class="label">总 Token</div><div class="value" id="statTokens">-</div><div class="sub">今日 <span id="statTodayTokens">0</span></div></div>
+<div class="stat-card"><div class="label">Prompt Tokens</div><div class="value" id="statPrompt">-</div></div>
+<div class="stat-card"><div class="label">Completion</div><div class="value" id="statCompletion">-</div></div>
+</div>
+<div class="stats-grid-2">
+<div class="stat-card"><div class="label">运行时间</div><div class="value" id="statUptime" style="font-size:18px;">-</div></div>
+<div class="stat-card"><div class="label">刷新次数</div><div class="value" id="statRefresh">-</div></div>
+<div class="stat-card"><div class="label">后台刷新</div><div class="value" id="statBackground" style="font-size:18px;">-</div></div>
+<div class="stat-card"><div class="label">Client</div><div class="value" id="statClient" style="font-size:18px;">-</div></div>
+</div>
+<div class="console-section">
+<h3>&#128202; 模型使用分布</h3>
+<div id="modelUsageChart"><span style="color:var(--muted);">暂无数据</span></div>
+</div>
+<div style="display:flex;gap:16px;">
+<div class="console-section" style="flex:1;min-width:0;margin-bottom:0;">
+<h3>&#128200; 24小时请求趋势</h3>
+<div class="hourly-chart-wrap"><canvas id="hourlyReqsChart" height="180"></canvas></div>
+</div>
+<div class="console-section" style="flex:1;min-width:0;margin-bottom:0;">
+<h3>&#128200; 24小时Token使用趋势</h3>
+<div class="hourly-chart-wrap"><canvas id="hourlyTokensChart" height="180"></canvas></div>
+</div>
+</div>
+<div class="console-section">
+<h3>&#128221; 运行信息</h3>
+<div class="metric-list">
+<div class="metric-row"><div class="k">Token 自动刷新</div><div class="v" id="statAutoRefresh">-</div></div>
+<div class="metric-row"><div class="k">后台定时刷新</div><div class="v" id="statBgRefresh">-</div></div>
+<div class="metric-row"><div class="k">当前模型数量</div><div class="v" id="statModelCount">-</div></div>
+<div class="metric-row"><div class="k">更新时间</div><div class="v" id="statUpdatedAt">-</div></div>
+</div>
+</div>
+</div>
+</div>
 
-    <script>
+<script>
     function getApiKey() {
         var key = localStorage.getItem('api_key') || localStorage.getItem('admin_api_key') || '';
         if (!key) {
@@ -1216,7 +1594,9 @@ def get_admin_html():
         }
         return key;
     }
-    const PORT = ''' + str(PORT) + ''';
+    const PORT = """
+        + str(PORT)
+        + """;
     const BASE_URL = location.protocol + "//" + location.host;
     
     // 立即获取有效API Key
@@ -1283,44 +1663,67 @@ def get_admin_html():
     }
 
     // ===== Tab switching =====
-    function switchTab(name) {
-        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-        document.getElementById('tab-' + name).classList.add('active');
-        var items = document.querySelectorAll('.nav-item');
-        var map = {chat:0, console:1, config:2};
-        if (map[name] !== undefined) items[map[name]].classList.add('active');
-        if (name === 'console') loadConsoleData();
-    }
+function switchTab(name) {
+document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+document.getElementById('tab-' + name).classList.add('active');
+var items = document.querySelectorAll('.nav-item');
+var map = {chat:0, console:1, stats:2, users:3, config:4};
+if (map[name] !== undefined) items[map[name]].classList.add('active');
+if (name === 'console') loadConsoleData();
+if (name === 'stats') loadStatsData();
+if (name === 'users') loadUsersList();
+}
 
     // ===== Simple Markdown Renderer =====
-    function renderMd(text) {
-        if (!text) return '';
-        // Escape HTML
-        var s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        // Code blocks
-        s = s.replace(/```([\\s\\S]*?)```/g, function(m, code) {
-            return '<pre><code>' + code.replace(/^\\n/,'') + '</code></pre>';
-        });
-        // Inline code
-        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-        // Bold
-        s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-        // Italic
-        s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
-        // Unordered list
-        s = s.replace(/^[\\s]*[-*]\\s+(.+)$/gm, '<li>$1</li>');
-        s = s.replace(/(<li>.*<\\/li>)/gs, '<ul>$1</ul>');
-        // Ordered list
-        s = s.replace(/^[\\s]*\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
-        // Line breaks
-        s = s.replace(/\\n/g, '<br>');
-        // Clean up double <br> inside pre
-        s = s.replace(/<pre><code>(.*?)<\\/code><\\/pre>/gs, function(m, c) {
-            return '<pre><code>' + c.replace(/<br>/g, '\\n') + '</code></pre>';
-        });
-        return s;
-    }
+function proxyImgUrl(url) {
+  if (url && url.match(/^http:\/\//) && location.protocol === 'https:') {
+    return '/proxy_image?url=' + encodeURIComponent(url);
+  }
+  return url;
+}
+function renderMd(text) {
+  if (!text) return '';
+  // Extract images BEFORE escaping to preserve URLs
+  var imgMap = [];
+  var s = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(m, alt, url) {
+    var idx = imgMap.length;
+    imgMap.push({alt: alt || 'image', url: url, proxyUrl: proxyImgUrl(url)});
+    return '\\u0000IMG' + idx + '\\u0000';
+  });
+  // Escape HTML
+  s = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Code blocks
+  s = s.replace(/```([\\s\\S]*?)```/g, function(m, code) {
+    return '<pre><code>' + code.replace(/^\\n/,'') + '</code></pre>';
+  });
+  // Inline code
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+  // Italic
+  s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+  // Restore images as HTML
+  s = s.replace(/\\u0000IMG(\\d+)\\u0000/g, function(m, idx) {
+    var img = imgMap[parseInt(idx)];
+    return '<div class=\"ai-img-wrap\">'
+      + '<img class=\"ai-img\" src=\"' + img.proxyUrl + '\" alt=\"' + img.alt + '\" onclick=\"openImgLightbox(this.src)\" />'
+      + '<div class=\"ai-img-hint\" onclick=\"openImgLightbox(this.previousElementSibling.src)\">\u70b9\u51fb\u67e5\u770b\u8be6\u7ec6\u56fe\u7247</div>'
+      + '</div>';
+  });
+  // Unordered list
+  s = s.replace(/^[\\s]*[-*]\\s+(.+)$/gm, '<li>$1</li>');
+  s = s.replace(/(<li>.*<\\/li>)/gs, '<ul>$1</ul>');
+  // Ordered list
+  s = s.replace(/^[\\s]*\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
+  // Line breaks
+  s = s.replace(/\\n/g, '<br>');
+  // Clean up double <br> inside pre
+  s = s.replace(/<pre><code>(.*?)<\\/code><\\/pre>/gs, function(m, c) {
+    return '<pre><code>' + c.replace(/<br>/g, '\\n') + '</code></pre>';
+  });
+  return s;
+}
 
     function timeStr() {
         var d = new Date();
@@ -1342,12 +1745,12 @@ async function loadModels() {
         var geminiGroup = document.createElement('optgroup');
         geminiGroup.label = 'Gemini';
         var proxyGroup = document.createElement('optgroup');
-        proxyGroup.label = '\u82F3\u4F1F\u8FBE / \u4EE3\u7406';
+        proxyGroup.label = '\u82f3\u4f1f\u8fbe / \u4ee3\u7406';
         (data.data || []).forEach(function(m) {
             var opt = document.createElement('option');
             opt.value = m.id;
             opt.textContent = m.id;
-            if (m.id.startsWith('\u82F3\u4F1F\u8FBE/')) {
+            if (m.id.startsWith('\u82f3\u4f1f\u8fbe/')) {
                 proxyGroup.appendChild(opt);
 } else {
                 geminiGroup.appendChild(opt);
@@ -1391,50 +1794,156 @@ async function loadModels() {
         renderPreviews();
     }
 
-    function addMessage(role, content, extra) {
-        var container = document.getElementById('chatMessages');
-        var div = document.createElement('div');
-        div.className = 'msg ' + role;
-        if (role === 'assistant') {
-            div.setAttribute('data-time', timeStr());
-            div.innerHTML = renderMd(content);
-        } else if (role === 'thinking') {
-            div.textContent = content;
-        } else {
-            var html = '';
-            if (extra && extra.images && extra.images.length > 0) {
-                html += '<div style="margin-bottom:8px;">';
-                extra.images.forEach(function(src) {
-                    html += '<img src="' + src + '" style="max-width:80px;max-height:80px;border-radius:6px;margin-right:4px;">';
-                });
-                html += '</div>';
-            }
-            html += text2html(content) + '<span class="msg-time">' + timeStr() + '</span>';
-            div.innerHTML = html;
-        }
-        container.appendChild(div);
-        container.scrollTop = container.scrollHeight;
-        return div;
+function addMessage(role, content, extra) {
+  var container = document.getElementById('chatMessages');
+  var div = document.createElement('div');
+  div.className = 'msg ' + role;
+  if (role === 'assistant') {
+    div.setAttribute('data-time', timeStr());
+    div.innerHTML = renderMd(content);
+  } else if (role === 'thinking') {
+    div.textContent = content;
+  } else {
+    var html = '';
+    if (extra && extra.images && extra.images.length > 0) {
+      html += '<div style="margin-bottom:8px;">';
+      extra.images.forEach(function(src) {
+        html += '<img src="' + src + '" style="max-width:80px;max-height:80px;border-radius:6px;margin-right:4px;">';
+      });
+      html += '</div>';
     }
+    html += text2html(content) + '<span class="msg-time">' + timeStr() + '</span>';
+    html += '<div class="msg-actions">';
+    html += '<button onclick="copyMsg(this)">\u590d\u5236</button>';
+    html += '<button onclick="editMsg(this)">\u7f16\u8f91</button>';
+    html += '</div>';
+    div.innerHTML = html;
+  }
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
 
-    function updateAssistantDiv(div, replyContent, thinkingContent) {
-        var html = '';
-        if (thinkingContent) {
-            html += '<div class="thinking-block">';
-            html += '<div class="thinking-toggle collapsed" onclick="this.classList.toggle(&quot;collapsed&quot;);this.nextElementSibling.classList.toggle(&quot;collapsed&quot;);">';
-            html += '<span class="arrow"></span> \u601d\u8003\u8fc7\u7a0b</div>';
-            html += '<div class="thinking-content collapsed">' + renderMd(thinkingContent) + '</div>';
-            html += '</div>';
-        }
-        html += renderMd(replyContent);
-        html += '<span class="msg-time">' + div.getAttribute('data-time') + '</span>';
-        div.innerHTML = html;
-        div.parentElement.scrollTop = div.parentElement.scrollHeight;
-    }
+function updateAssistantDiv(div, replyContent, thinkingContent, isThinkingActive) {
+  var html = '';
+  if (thinkingContent) {
+    html += '<div class="thinking-block">';
+    var toggleClass = isThinkingActive ? 'thinking-toggle' : 'thinking-toggle collapsed';
+    var contentClass = isThinkingActive ? 'thinking-content' : 'thinking-content collapsed';
+    html += '<div class="' + toggleClass + '" onclick="this.classList.toggle(&quot;collapsed&quot;);this.nextElementSibling.classList.toggle(&quot;collapsed&quot;);">';
+    html += '<span class="arrow"></span> \u601d\u8003\u8fc7\u7a0b</div>';
+    html += '<div class="' + contentClass + '">' + renderMd(thinkingContent) + '</div>';
+    html += '</div>';
+  }
+  html += renderMd(replyContent);
+  if (isThinkingActive || !replyContent) {
+    html += '<span class="inline-spinner"></span>';
+  } else {
+    html += '<span class="msg-time">' + div.getAttribute('data-time') + '</span>';
+  }
+  div.innerHTML = html;
+  var tc = div.querySelector('.thinking-content');
+  if (tc) tc.scrollTop = tc.scrollHeight;
+  div.parentElement.scrollTop = div.parentElement.scrollHeight;
+}
 
     function text2html(t) {
-        return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
+    return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
     }
+
+// ===== Prompt Management =====
+var userPrompts = [];
+var activePromptId = null;
+
+async function loadPromptList() {
+try {
+var pResp = await fetch('/admin/prompts/prompt', {credentials:'same-origin'});
+var pData = await pResp.json();
+userPrompts = pData.data || [];
+
+var pSel = document.getElementById('promptSelect');
+pSel.innerHTML = '<option value="">(none)</option>';
+userPrompts.forEach(function(p) {
+var opt = document.createElement('option');
+opt.value = p.id;
+opt.textContent = p.title || '(untitled)';
+if (p.is_active) opt.selected = true;
+pSel.appendChild(opt);
+});
+activePromptId = (userPrompts.find(function(p){return p.is_active;}) || {}).id || null;
+} catch(e) { console.error('loadPromptList', e); }
+}
+
+function onPromptChange() {
+var val = document.getElementById('promptSelect').value;
+var id = val ? parseInt(val) : 0;
+fetch('/admin/prompts/prompt/' + id + '/activate', {method:'POST', credentials:'same-origin'}).catch(function(){});
+activePromptId = id || null;
+}
+
+function openPromptEditor(ptype) {
+var existing = userPrompts;
+var html = '<div class="prompt-editor-modal" id="promptEditorModal" onclick="if(event.target===this)this.remove()">';
+html += '<div class="modal-box">';
+html += '<h3>System Prompt \u7ba1\u7406</h3>';
+html += '<div style="margin-bottom:12px;">';
+existing.forEach(function(p) {
+html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);">';
+html += '<span style="flex:1;font-size:13px;cursor:pointer;' + (p.is_active?'color:var(--blue);font-weight:600;':'') + '" data-prompt-type="prompt" data-prompt-id="' + p.id + '" onclick="selectPromptItem(this.dataset.promptType,parseInt(this.dataset.promptId))">' + (p.title||'(untitled)') + '</span>';
+html += '<button style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;" data-prompt-type="prompt" data-prompt-id="' + p.id + '" onclick="deletePromptItem(this.dataset.promptType,parseInt(this.dataset.promptId))">&#128465;</button>';
+html += '</div>';
+});
+html += '</div>';
+html += '<hr style="border:none;border-top:1px solid var(--border);margin:16px 0;">';
+html += '<input id="promptEditorTitle" placeholder="\u6807\u9898" />';
+html += '<textarea id="promptEditorContent" placeholder="System prompt \u5185\u5bb9..."></textarea>';
+html += '<div class="modal-btns">';
+html += '<button class="btn-secondary" onclick="document.getElementById(&quot;promptEditorModal&quot;).remove()">\u53d6\u6d88</button>';
+html += '<button class="btn-primary" data-prompt-type="prompt" onclick="savePromptItem(this.dataset.promptType)">\u4fdd\u5b58</button>';
+html += '</div></div></div>';
+document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function savePromptItem(ptype) {
+var title = document.getElementById('promptEditorTitle').value.trim();
+var content = document.getElementById('promptEditorContent').value.trim();
+if (!content) return;
+var resp = await fetch('/admin/prompts/' + ptype, {
+method: 'POST', credentials: 'same-origin',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({title: title, content: content})
+});
+var data = await resp.json();
+if (data.success) {
+document.getElementById('promptEditorModal').remove();
+loadPromptList();
+}
+}
+
+async function selectPromptItem(ptype, id) {
+var item = userPrompts.find(function(p){return p.id === id;});
+if (!item) return;
+document.getElementById('promptEditorTitle').value = item.title;
+document.getElementById('promptEditorContent').value = item.content;
+document.getElementById('promptSelect').value = id.toString();
+fetch('/admin/prompts/prompt/' + id + '/activate', {method:'POST', credentials:'same-origin'}).catch(function(){});
+activePromptId = id;
+}
+
+async function deletePromptItem(ptype, id) {
+await fetch('/admin/prompts/' + ptype + '/' + id, {method:'DELETE', credentials:'same-origin'});
+document.getElementById('promptEditorModal').remove();
+loadPromptList();
+}
+
+function getActivePromptContent() {
+var p = userPrompts.find(function(x){return x.id === activePromptId;});
+return (p && p.content) || '';
+}
+
+loadPromptList();
+
+    loadPromptList();
 
     async function sendMessage() {
         if (isSending) return;
@@ -1469,10 +1978,18 @@ async function loadModels() {
         // Add to history
         chatHistory.push({role: 'user', content: content});
 
-        // Show thinking
-        var thinkDiv = addMessage('thinking', '');
+        // Inject active prompt as system message
+        var systemPrompt = getActivePromptContent();
+        var messagesToSend = chatHistory.slice();
+        if (systemPrompt) {
+            messagesToSend = [{role: 'system', content: systemPrompt}].concat(messagesToSend);
+        }
 
-        try {
+// Show assistant bubble with spinner
+var replyDiv = addMessage('assistant', '');
+replyDiv.innerHTML = '<span class="inline-spinner"></span>';
+
+try {
             var model = document.getElementById('modelSelect').value || 'gemini-3.0-flash';
             var resp = await fetch('/v1/chat/completions', {
                 method: 'POST',
@@ -1480,26 +1997,28 @@ async function loadModels() {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + getApiKey()
                 },
-                body: JSON.stringify({
+                    body: JSON.stringify({
                     model: model,
-                    messages: chatHistory,
+                    messages: messagesToSend,
                     stream: true
                 })
             });
             
-if (!resp.ok) {
-            var errData = await resp.json();
-            thinkDiv.remove();
-            addMessage('assistant', '\u9519\u8bef: ' + (errData.detail || errData.error || '\u8bf7\u6c42\u5931\u8d25'));
-            isSending = false;
-            document.getElementById('sendBtn').disabled = false;
-            return;
-        }
+        if (!resp.ok) {
+            var errText;
+            try { var errJson = await resp.json(); errText = errJson.detail || errJson.error || JSON.stringify(errJson); }
+catch(_) { errText = await resp.text().catch(function(){return '\u8bf7\u6c42\u5931\u8d25 (HTTP ' + resp.status + ')'}); }
+replyDiv.remove();
+addMessage('assistant', '\u9519\u8bef: ' + errText);
+isSending = false;
+document.getElementById('sendBtn').disabled = false;
+return;
+}
 
-        var replyDiv = addMessage('assistant', '');
-        var replyContent = '';
-        var thinkingContent = '';
-        var thinkingDone = false;
+var replyContent = '';
+var thinkingContent = '';
+var thinkingDone = false;
+var _inThinkTag = -1;
 
         var reader = resp.body.getReader();
         var decoder = new TextDecoder();
@@ -1517,37 +2036,75 @@ if (!resp.ok) {
                     try {
                         var data = JSON.parse(dataStr);
                         var delta = data.choices[0].delta;
-                        if (delta) {
-                            // reasoning_content: deepseek-v4 / glm-5.1 thinking
-                            if (delta.reasoning_content) {
-                                thinkingContent += delta.reasoning_content;
-                                updateAssistantDiv(replyDiv, replyContent, thinkingContent);
-                            }
-                            // content: normal reply
-                            if (delta.content) {
-                                if (thinkingContent && !thinkingDone) {
-                                    thinkingDone = true;
-                                }
-                                replyContent += delta.content;
-                                updateAssistantDiv(replyDiv, replyContent, thinkingContent);
-                            }
+                    if (delta) {
+                        // reasoning_content / reasoning: thinking
+                        if (delta.reasoning_content) {
+                            thinkingContent += delta.reasoning_content;
+                            updateAssistantDiv(replyDiv, replyContent, thinkingContent, true);
+                        }
+                        if (delta.reasoning) {
+                            thinkingContent += delta.reasoning;
+                            updateAssistantDiv(replyDiv, replyContent, thinkingContent, true);
+                        }
+// content: check for inline thinking tags
+if (delta.content) {
+var c = delta.content;
+var thinkPairs = [
+{open: '<thinking>', close: '</thinking>'},
+{open: '<think>', close: '</think>'},
+{open: '<reasoning>', close: '</reasoning>'},
+{open: '<reason>', close: '</reason>'},
+{open: '<reflect>', close: '</reflect>'},
+{open: '<reflection>', close: '</reflection>'},
+{open: '<thought>', close: '</thought>'}
+];
+var matched = false;
+for (var ti = 0; ti < thinkPairs.length; ti++) {
+var pair = thinkPairs[ti];
+var hasOpen = c.indexOf(pair.open) > -1;
+var hasClose = c.indexOf(pair.close) > -1;
+if (hasOpen || _inThinkTag === ti) {
+_inThinkTag = ti;
+matched = true;
+if (hasOpen) {
+c = c.split(pair.open)[1] || '';
+}
+if (hasClose) {
+var beforeClose = c.split(pair.close)[0] || '';
+var afterClose = c.substring(c.indexOf(pair.close) + pair.close.length);
+thinkingContent += beforeClose;
+if (afterClose) replyContent += afterClose;
+thinkingDone = true;
+_inThinkTag = -1;
+} else {
+thinkingContent += c;
+c = '';
+}
+break;
+}
+}
+if (!matched && c) {
+if (thinkingContent && !thinkingDone) {
+thinkingDone = true;
+_inThinkTag = -1;
+}
+replyContent += c;
+}
+updateAssistantDiv(replyDiv, replyContent, thinkingContent, !thinkingDone);
+}
                         }
                     } catch(e) {}
                 }
             }
         }
 
-        // remove thinking spinner after stream ends
-        if (thinkDiv && thinkDiv.parentElement) thinkDiv.remove();
+// final update with time (thinking done, collapse)
+updateAssistantDiv(replyDiv, replyContent, thinkingContent, false);
 
-        // final update with time
-        updateAssistantDiv(replyDiv, replyContent, thinkingContent);
+chatHistory.push({role: 'assistant', content: replyContent});
 
-        chatHistory.push({role: 'assistant', content: replyContent});
-            
 } catch(e) {
-        if (thinkDiv && thinkDiv.parentElement) thinkDiv.remove();
-        addMessage('assistant', '\u8bf7\u6c42\u5931\u8d25: ' + e.message);
+addMessage('assistant', '\u8bf7\u6c42\u5931\u8d25: ' + e.message);
     }
 
         isSending = false;
@@ -1591,137 +2148,411 @@ if (!resp.ok) {
         }
     }
 
-    // ===== Console =====
-    var consoleTimer = null;
-    var lastConsoleSnapshot = null;
+// ===== Console =====
+var consoleTimer = null;
+var lastConsoleSnapshot = null;
 
-    function refreshConsoleData() {
-        loadConsoleData();
-    }
+function refreshTokenNow() {
+fetch('/v1/token/refresh', {
+method: 'POST',
+headers: {'Authorization': 'Bearer ' + getApiKey()}
+}).then(function(r) { return r.json(); }).then(function() {
+updateTokenBadge();
+}).catch(function(err) { console.error(err); });
+}
 
-    function refreshTokenNow() {
-        fetch('/v1/token/refresh', {
-            method: 'POST',
-            headers: {'Authorization': 'Bearer ' + getApiKey()}
-        }).then(function(r) { return r.json(); }).then(function() {
-            updateTokenBadge();
-            loadConsoleData();
-        }).catch(function(err) {
-            console.error(err);
-        });
-    }
+function resetClientNow() {
+fetch('/v1/client/reset', {
+method: 'POST',
+headers: {'Authorization': 'Bearer ' + getApiKey()}
+}).then(function(r) { return r.json(); }).then(function() {
+loadStatsData();
+}).catch(function(err) { console.error(err); });
+}
 
-    function resetClientNow() {
-        fetch('/v1/client/reset', {
-            method: 'POST',
-            headers: {'Authorization': 'Bearer ' + getApiKey()}
-        }).then(function(r) { return r.json(); }).then(function() {
-            loadConsoleData();
-        }).catch(function(err) {
-            console.error(err);
-        });
-    }
+async function loadConsoleData() {
+document.getElementById('dispBaseUrl').textContent = BASE_URL + '/v1';
+loadApiKeys();
+try {
+var resp2 = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+getApiKey()}});
+if (resp2.ok) {
+var mdata = await resp2.json();
+var ml = document.getElementById('modelsList');
+ml.innerHTML = '';
+(mdata.data || []).forEach(function(m) {
+var tag = document.createElement('span');
+tag.className = 'model-tag';
+tag.textContent = m.id;
+ml.appendChild(tag);
+});
+}
+} catch(e) { console.error('Models error:', e); }
+document.getElementById('rustCode').textContent = '// Cargo.toml \u4f9d\u8d56\\n// [dependencies]\\n// reqwest = { version = "0.12", features = ["json"] }\\n// serde = { version = "1", features = ["derive"] }\\n// serde_json = "1"\\n// tokio = { version = "1", features = ["full"] }\\n\\nuse serde::{Deserialize, Serialize};\\n\\n#[derive(Serialize)]\\nstruct ChatRequest {\\n model: String,\\n messages: Vec<Message>,\\n stream: bool,\\n}\\n\\n#[derive(Serialize)]\\nstruct Message {\\n role: String,\\n content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ChatResponse {\\n choices: Vec<Choice>,\\n usage: Usage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Choice {\\n message: ResponseMessage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ResponseMessage {\\n content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Usage {\\n prompt_tokens: u32,\\n completion_tokens: u32,\\n total_tokens: u32,\\n}\\n\\n#[tokio::main]\\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\\n let client = reqwest::Client::new();\\n \\n let request = ChatRequest {\\n model: "gemini-3.0-flash".to_string(),\\n messages: vec![Message {\\n role: "user".to_string(),\\n content: "\u4f60\u597d".to_string(),\\n }],\\n stream: false,\\n };\\n\\n let response = client\\n .post("https://yj.nm.cn:8443/v1/chat/completions")\\n .header("Authorization", "Bearer sk-xxxxxxxxx")\\n .json(&request)\\n .send()\\n .await?\\n .json::<ChatResponse>()\\n .await?;\\n\\n println!("\u56de\u590d: {}", response.choices[0].message.content);\\n println!("Token \u7528\u91cf: {}", response.usage.total_tokens);\\n \\n Ok(())\\n}';
+try {
+var hResp = await fetch('/admin/user-hourly-stats', {credentials:'same-origin'});
+if (hResp.ok) {
+var hData = await hResp.json();
+var hourly = hData.data || [];
+console.log('[Console] user-hourly-stats rows:', hourly.length);
+drawUserModelBarChart(hourly);
+drawUserTokenLineChart(hourly);
+} else {
+console.error('user-hourly-stats HTTP', hResp.status);
+}
+} catch(e) { console.error('User hourly stats error:', e); }
+if (consoleTimer) clearInterval(consoleTimer);
+consoleTimer = setInterval(loadConsoleData, 10000);
+}
 
-    function exportConsoleData() {
-        var payload = {
-            exported_at: new Date().toISOString(),
-            snapshot: lastConsoleSnapshot,
-            chat_count: chatHistory.length,
-            image_count: attachedImages.length
-        };
-        var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'gemini-console-export.json';
-        a.click();
-        setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
-    }
+var CHART_COLORS = ['#4285f4','#ea4335','#fbbc04','#34a853','#ff6d01','#46bdc6','#7b1fa2','#e91e63','#00bcd4','#8bc34a'];
 
-    function clearChatHistory() {
-        chatHistory = [];
-        attachedImages = [];
-        renderPreviews();
-        document.getElementById('chatMessages').innerHTML = '';
-    }
+function drawUserModelBarChart(hourlyData) {
+var canvas = document.getElementById('userModelBarChart');
+if (!canvas) return;
+var dpr = window.devicePixelRatio || 1;
+var rect = canvas.parentElement.getBoundingClientRect();
+var W = rect.width - 32; if (W < 100) W = 100;
+var H = parseInt(canvas.getAttribute('height')) || 200;
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+var ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+var now = new Date(); var curHour = now.getHours();
+var models = {}; var hours = [];
+for (var i = 0; i < 24; i++) { var h = (curHour - 23 + i + 24) % 24; hours.push(h); }
+hourlyData.forEach(function(d) { if (!models[d.model]) models[d.model] = {}; models[d.model][d.hour] = d.requests; });
+var modelNames = Object.keys(models);
+if (modelNames.length === 0) { ctx.clearRect(0,0,W,H); ctx.fillStyle = '#9aa0a6'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('\u6682\u65e0\u6570\u636e', W/2, H/2); return; }
+var maxVal = 0;
+for (var hi = 0; hi < 24; hi++) { var total = 0; modelNames.forEach(function(m){ total += (models[m][hours[hi]] || 0); }); if (total > maxVal) maxVal = total; }
+if (maxVal === 0) maxVal = 1;
+var padL = 50, padR = 10, padT = 10, padB = 55;
+var cW = W - padL - padR; var cH = H - padT - padB;
+var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+var gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+var textColor = isDark ? '#9aa0a6' : '#5f6368';
+ctx.clearRect(0, 0, W, H);
+ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+for (var g = 0; g <= 4; g++) {
+var gy = padT + cH - (cH * g / 4);
+ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + cW, gy); ctx.stroke();
+ctx.fillStyle = textColor; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+ctx.fillText(Math.round(maxVal * g / 4), padL - 6, gy + 4);
+}
+ctx.textAlign = 'center'; ctx.font = '10px sans-serif';
+var barW = cW / 24;
+for (var xi = 0; xi < 24; xi++) {
+if (xi % 3 === 0) ctx.fillText(hours[xi].toString().padStart(2,'0')+':00', padL + barW * xi + barW/2, H - 6);
+}
+for (var bi = 0; bi < 24; bi++) {
+var bottomY = padT + cH;
+for (var mi = 0; mi < modelNames.length; mi++) {
+var val = models[modelNames[mi]][hours[bi]] || 0;
+if (val === 0) continue;
+var bH = cH * val / maxVal;
+bottomY -= bH;
+ctx.fillStyle = CHART_COLORS[mi % CHART_COLORS.length];
+ctx.fillRect(padL + barW * bi + 2, bottomY, barW - 4, bH);
+}
+}
+var lx = padL; var ly = H - 30;
+modelNames.forEach(function(m, idx) {
+ctx.fillStyle = CHART_COLORS[idx % CHART_COLORS.length];
+ctx.fillRect(lx, ly, 10, 10);
+ctx.fillStyle = textColor; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+var short = m.length > 15 ? m.substring(0,15)+'...' : m;
+ctx.fillText(short, lx + 14, ly + 9);
+lx += ctx.measureText(short).width + 24;
+if (lx > W - 60) { lx = padL; ly -= 14; }
+});
+}
 
-    async function loadConsoleData() {
-        try {
-            var resp = await fetch('/admin/stats', {credentials:'same-origin'});
-            if (resp.status === 401) { location.href = '/admin/login'; return; }
-            var s = await resp.json();
-            lastConsoleSnapshot = s;
-            document.getElementById('statReqs').textContent = s.total_requests;
-            document.getElementById('statTokens').textContent = s.total_tokens;
-            document.getElementById('statPrompt').textContent = s.total_prompt_tokens;
-            document.getElementById('statCompletion').textContent = s.total_completion_tokens;
-            document.getElementById('statUptime').textContent = s.uptime;
-            document.getElementById('statRefresh').textContent = s.token_refresh_count;
-            document.getElementById('statBackground').textContent = s.background_refresh_enabled ? '开启' : '关闭';
-            document.getElementById('statClient').textContent = s.client_active ? '在线' : '离线';
-            document.getElementById('statAutoRefresh').textContent = s.auto_refresh_enabled ? '开启' : '关闭';
-            document.getElementById('statBgRefresh').textContent = s.background_refresh_enabled ? '开启' : '关闭';
-            document.getElementById('statUpdatedAt').textContent = new Date().toLocaleString();
+function drawUserTokenLineChart(hourlyData) {
+var canvas = document.getElementById('userTokenLineChart');
+if (!canvas) return;
+var dpr = window.devicePixelRatio || 1;
+var rect = canvas.parentElement.getBoundingClientRect();
+var W = rect.width - 32; if (W < 100) W = 100;
+var H = parseInt(canvas.getAttribute('height')) || 200;
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+var ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+var now = new Date(); var curHour = now.getHours();
+var labels = []; var values = [];
+for (var i = 0; i < 24; i++) {
+var h = (curHour - 23 + i + 24) % 24;
+labels.push(h.toString().padStart(2, '0') + ':00');
+var total = 0;
+for (var j = 0; j < hourlyData.length; j++) { if (hourlyData[j].hour === h) total += hourlyData[j].total_tokens; }
+values.push(total);
+}
+if (Math.max.apply(null, values) === 0) { ctx.clearRect(0,0,W,H); ctx.fillStyle = '#9aa0a6'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('\u6682\u65e0\u6570\u636e', W/2, H/2); return; }
+drawLineChart(ctx, W, H, labels, values, '#34a853', '#0d904f');
+}
 
-            if (s.today_requests !== undefined) {
-                var todayReqs = document.getElementById('statTodayReqs');
-                if (todayReqs) todayReqs.textContent = s.today_requests;
-            }
-            if (s.today_tokens !== undefined) {
-                var todayTks = document.getElementById('statTodayTokens');
-                if (todayTks) todayTks.textContent = s.today_tokens;
-            }
+function drawLineChart(ctx, W, H, labels, values, lineColor, fillColor) {
+var maxVal = Math.max.apply(null, values); if (maxVal === 0) maxVal = 1;
+var padL = 60, padR = 10, padT = 10, padB = 30;
+var cW = W - padL - padR; var cH = H - padT - padB;
+var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+var gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+var textColor = isDark ? '#9aa0a6' : '#5f6368';
+ctx.clearRect(0, 0, W, H);
+ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+for (var g = 0; g <= 4; g++) { var gy = padT + cH - (cH * g / 4); ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + cW, gy); ctx.stroke(); ctx.fillStyle = textColor; ctx.font = '11px sans-serif'; ctx.textAlign = 'right'; ctx.fillText(formatNum(Math.round(maxVal * g / 4)), padL - 6, gy + 4); }
+ctx.textAlign = 'center'; ctx.font = '10px sans-serif';
+for (var xi = 0; xi < 24; xi += 3) { var xx = padL + (cW * xi / 23); ctx.fillText(labels[xi], xx, H - 4); }
+ctx.beginPath();
+for (var li = 0; li < 24; li++) { var lx = padL + (cW * li / 23); var ly = padT + cH - (cH * values[li] / maxVal); if (li === 0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly); }
+ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.stroke();
+ctx.lineTo(padL + cW, padT + cH); ctx.lineTo(padL, padT + cH); ctx.closePath(); ctx.fillStyle = fillColor + '22'; ctx.fill();
+for (var di = 0; di < 24; di++) { if (values[di] > 0) { var dx = padL + (cW * di / 23); var dy = padT + cH - (cH * values[di] / maxVal); ctx.beginPath(); ctx.arc(dx, dy, 3, 0, 6.2832); ctx.fillStyle = lineColor; ctx.fill(); } }
+}
 
-            // Model usage chart
-            var chart = document.getElementById('modelUsageChart');
-            var models = s.requests_by_model || {};
-            var keys = Object.keys(models);
-            if (keys.length === 0) {
-                chart.innerHTML = '<span style="color:var(--muted);font-size:13px;">暂无请求数据</span>';
-            } else {
-                var maxVal = Math.max.apply(null, keys.map(function(k){return models[k];}));
-                chart.innerHTML = '';
-                keys.sort(function(a, b) { return models[b] - models[a]; });
-                keys.forEach(function(k) {
-                    var pct = maxVal > 0 ? (models[k] / maxVal * 100) : 0;
-                    var row = document.createElement('div');
-                    row.className = 'model-bar';
-                    row.innerHTML = '<div class="name">' + k + '</div><div class="bar-bg"><div class="bar-fill" style="width:' + pct + '%">' + models[k] + '</div></div>';
-                    chart.appendChild(row);
-                });
-                document.getElementById('statModelCount').textContent = keys.length;
-            }
-        } catch(e) { console.error('Stats error:', e); }
+function formatNum(n) { if (n >= 1000000) return (n/1000000).toFixed(1)+'M'; if (n >= 1000) return (n/1000).toFixed(1)+'K'; return n.toString(); }
 
-        // Base URL
-        document.getElementById('dispBaseUrl').textContent = BASE_URL + '/v1';
+// ===== Global Stats =====
+var statsTimer = null;
+async function loadStatsData() {
+try {
+var resp = await fetch('/admin/stats', {credentials:'same-origin'});
+if (resp.status === 401) { location.href = '/admin/login'; return; }
+var s = await resp.json();
+lastConsoleSnapshot = s;
+document.getElementById('statReqs').textContent = s.total_requests;
+document.getElementById('statTokens').textContent = formatNum(s.total_tokens);
+document.getElementById('statPrompt').textContent = formatNum(s.total_prompt_tokens);
+document.getElementById('statCompletion').textContent = formatNum(s.total_completion_tokens);
+document.getElementById('statUptime').textContent = s.uptime;
+document.getElementById('statRefresh').textContent = s.token_refresh_count;
+document.getElementById('statBackground').textContent = s.background_refresh_enabled ? '\u5f00\u542f' : '\u5173\u95ed';
+document.getElementById('statClient').textContent = s.client_active ? '\u5728\u7ebf' : '\u79bb\u7ebf';
+document.getElementById('statAutoRefresh').textContent = s.auto_refresh_enabled ? '\u5f00\u542f' : '\u5173\u95ed';
+document.getElementById('statBgRefresh').textContent = s.background_refresh_enabled ? '\u5f00\u542f' : '\u5173\u95ed';
+document.getElementById('statUpdatedAt').textContent = new Date().toLocaleString();
+if (s.today_requests !== undefined) { var el = document.getElementById('statTodayReqs'); if (el) el.textContent = s.today_requests; }
+if (s.today_tokens !== undefined) { var el2 = document.getElementById('statTodayTokens'); if (el2) el2.textContent = formatNum(s.today_tokens); }
+var chart = document.getElementById('modelUsageChart');
+var models = s.requests_by_model || {}; var keys = Object.keys(models);
+if (keys.length === 0) {
+chart.innerHTML = '<span style="color:var(--muted);font-size:13px;">\u6682\u65e0\u8bf7\u6c42\u6570\u636e</span>';
+} else {
+var maxVal = Math.max.apply(null, keys.map(function(k){return models[k];}));
+chart.innerHTML = '';
+keys.sort(function(a, b) { return models[b] - models[a]; });
+keys.forEach(function(k, idx) {
+var pct = maxVal > 0 ? (models[k] / maxVal * 100) : 0;
+var color = CHART_COLORS[idx % CHART_COLORS.length];
+var row = document.createElement('div'); row.className = 'model-bar';
+row.innerHTML = '<div class="name">' + k + '</div><div class="bar-bg"><div class="bar-fill" style="width:' + pct + '%;background:' + color + '">' + models[k] + '</div></div>';
+chart.appendChild(row);
+});
+document.getElementById('statModelCount').textContent = keys.length;
+}
+} catch(e) { console.error('Stats error:', e); }
+try {
+var hResp = await fetch('/admin/hourly-stats', {credentials:'same-origin'});
+var hData = await hResp.json();
+var hourly = hData.data || [];
+drawHourlyChart('hourlyReqsChart', hourly, 'requests', '#1a73e8', '#4285f4');
+drawHourlyChart('hourlyTokensChart', hourly, 'total_tokens', '#34a853', '#0d904f');
+} catch(e) { console.error('Hourly stats error:', e); }
+if (statsTimer) clearInterval(statsTimer);
+statsTimer = setInterval(loadStatsData, 10000);
+}
 
-        // Load API Keys
-        loadApiKeys();
+function drawHourlyChart(canvasId, hourlyData, field, lineColor, fillColor) {
+var canvas = document.getElementById(canvasId);
+if (!canvas) return;
+var dpr = window.devicePixelRatio || 1;
+var rect = canvas.parentElement.getBoundingClientRect();
+var W = rect.width - 32;
+var H = parseInt(canvas.getAttribute('height')) || 160;
+canvas.width = W * dpr;
+canvas.height = H * dpr;
+canvas.style.width = W + 'px';
+canvas.style.height = H + 'px';
+var ctx = canvas.getContext('2d');
+ctx.scale(dpr, dpr);
 
-        // Models list
-        try {
-            var resp2 = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+getApiKey()}});
-            var mdata = await resp2.json();
-            var ml = document.getElementById('modelsList');
-            ml.innerHTML = '';
-            (mdata.data || []).forEach(function(m) {
-                var tag = document.createElement('span');
-                tag.className = 'model-tag';
-                tag.textContent = m.id;
-                ml.appendChild(tag);
-            });
-            document.getElementById('statModelCount').textContent = (mdata.data || []).length;
-        } catch(e) {}
+var now = new Date();
+var curHour = now.getHours();
+var labels = [];
+var values = [];
+for (var i = 0; i < 24; i++) {
+var h = (curHour - 23 + i + 24) % 24;
+labels.push(h.toString().padStart(2, '0') + ':00');
+var found = null;
+for (var j = 0; j < hourlyData.length; j++) {
+if (hourlyData[j].hour === h) { found = hourlyData[j]; break; }
+}
+values.push(found ? found[field] : 0);
+}
 
-        // Rust code
-        document.getElementById('rustCode').textContent = '// Cargo.toml 依赖\\n// [dependencies]\\n// reqwest = { version = "0.12", features = ["json"] }\\n// serde = { version = "1", features = ["derive"] }\\n// serde_json = "1"\\n// tokio = { version = "1", features = ["full"] }\\n\\nuse serde::{Deserialize, Serialize};\\n\\n#[derive(Serialize)]\\nstruct ChatRequest {\\n    model: String,\\n    messages: Vec<Message>,\\n    stream: bool,\\n}\\n\\n#[derive(Serialize)]\\nstruct Message {\\n    role: String,\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ChatResponse {\\n    choices: Vec<Choice>,\\n    usage: Usage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Choice {\\n    message: ResponseMessage,\\n}\\n\\n#[derive(Deserialize)]\\nstruct ResponseMessage {\\n    content: String,\\n}\\n\\n#[derive(Deserialize)]\\nstruct Usage {\\n    prompt_tokens: u32,\\n    completion_tokens: u32,\\n    total_tokens: u32,\\n}\\n\\n#[tokio::main]\\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\\n    let client = reqwest::Client::new();\\n    \\n    let request = ChatRequest {\\n        model: "gemini-3.0-flash".to_string(),\\n        messages: vec![Message {\\n            role: "user".to_string(),\\n            content: "你好".to_string(),\\n        }],\\n        stream: false,\\n    };\\n\\n    let response = client\\n        .post("' + BASE_URL + '/v1/chat/completions")\\n        .header("Authorization", "Bearer ' + getApiKey() + '")\\n        .json(&request)\\n        .send()\\n        .await?\\n        .json::<ChatResponse>()\\n        .await?;\\n\\n    println!("回复: {}", response.choices[0].message.content);\\n    println!("Token 用量: {}", response.usage.total_tokens);\\n    \\n    Ok(())\\n}';
+var maxVal = Math.max.apply(null, values);
+if (maxVal === 0) maxVal = 1;
+var padL = 50, padR = 10, padT = 10, padB = 30;
+var cW = W - padL - padR;
+var cH = H - padT - padB;
 
-        // Auto refresh
-        if (consoleTimer) clearInterval(consoleTimer);
-        consoleTimer = setInterval(loadConsoleData, 10000);
-    }
+var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+var gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+var textColor = isDark ? '#9aa0a6' : '#5f6368';
 
-    // ===== Modal Functions =====
+ctx.clearRect(0, 0, W, H);
+
+// grid
+ctx.strokeStyle = gridColor;
+ctx.lineWidth = 1;
+for (var g = 0; g <= 4; g++) {
+var gy = padT + cH - (cH * g / 4);
+ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + cW, gy); ctx.stroke();
+ctx.fillStyle = textColor;
+ctx.font = '11px sans-serif';
+ctx.textAlign = 'right';
+ctx.fillText(Math.round(maxVal * g / 4), padL - 6, gy + 4);
+}
+
+// x labels
+ctx.textAlign = 'center';
+ctx.font = '10px sans-serif';
+for (var xi = 0; xi < 24; xi += 3) {
+var xx = padL + (cW * xi / 23);
+ctx.fillText(labels[xi], xx, H - 4);
+}
+
+// line + fill
+ctx.beginPath();
+for (var li = 0; li < 24; li++) {
+var lx = padL + (cW * li / 23);
+var ly = padT + cH - (cH * values[li] / maxVal);
+if (li === 0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly);
+}
+ctx.strokeStyle = lineColor;
+ctx.lineWidth = 2;
+ctx.stroke();
+
+ctx.lineTo(padL + cW, padT + cH);
+ctx.lineTo(padL, padT + cH);
+ctx.closePath();
+ctx.fillStyle = fillColor + '22';
+ctx.fill();
+
+// dots
+for (var di = 0; di < 24; di++) {
+var dx = padL + (cW * di / 23);
+var dy = padT + cH - (cH * values[di] / maxVal);
+if (values[di] > 0) {
+ctx.beginPath(); ctx.arc(dx, dy, 3, 0, 6.2832);
+ctx.fillStyle = lineColor; ctx.fill();
+}
+}
+}
+
+// ===== User Management =====
+async function loadUsersList() {
+try {
+var resp = await fetch('/admin/users', {credentials:'same-origin'});
+if (resp.status === 403) { document.getElementById('usersList').innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px;">需要管理员权限</p>'; return; }
+var data = await resp.json();
+var users = data.data || [];
+var container = document.getElementById('usersList');
+document.getElementById('userDetail').style.display = 'none';
+container.style.display = '';
+var html = '';
+if (users.length === 0) {
+html = '<p style="color:var(--muted);text-align:center;padding:40px;">暂无用户</p>';
+} else {
+users.forEach(function(u) {
+html += '<div class="user-card" onclick="loadUserDetail(' + u.id + ')">';
+html += '<div class="user-info">';
+html += '<div class="user-name">' + u.username + (u.is_admin ? ' <span style="font-size:11px;background:#e6f4ea;color:#137333;padding:2px 8px;border-radius:10px;margin-left:6px;">管理员</span>' : '') + '</div>';
+html += '<div class="user-meta">';
+html += '<span>ID: ' + u.id + '</span>';
+html += '<span>' + (u.email || '-') + '</span>';
+html += '<span>Keys: ' + u.key_count + '</span>';
+html += '<span>请求: ' + u.total_requests + '</span>';
+html += '<span>Tokens: ' + u.total_tokens + '</span>';
+if (u.created_at) html += '<span>注册: ' + u.created_at.substring(0,10) + '</span>';
+html += '</div></div>';
+html += '<div class="user-actions">';
+html += '<button class="api-key-item key-btn" data-user-id="' + u.id + '" onclick="event.stopPropagation();toggleAdmin(' + u.id + ',this)">' + (u.is_admin ? '取消管理员' : '设为管理员') + '</button>';
+html += '<button class="api-key-item key-btn delete" onclick="event.stopPropagation();deleteUser(' + u.id + ',this)">&#128465;</button>';
+html += '</div></div>';
+});
+}
+container.innerHTML = html;
+} catch(e) { console.error('loadUsersList', e); }
+}
+
+async function loadUserDetail(userId) {
+try {
+var resp = await fetch('/admin/users/' + userId, {credentials:'same-origin'});
+var data = await resp.json();
+var u = data.data;
+if (!u) return;
+var listEl = document.getElementById('usersList');
+var detailEl = document.getElementById('userDetail');
+listEl.style.display = 'none';
+detailEl.style.display = '';
+var html = '<button class="back-btn" onclick="loadUsersList()">&#8592; 返回用户列表</button>';
+html += '<div class="user-detail-panel">';
+html += '<h3>' + u.username + ' <span style="font-size:14px;color:var(--muted);font-weight:400;">(ID: ' + u.id + ')</span>';
+html += u.is_admin ? ' <span style="font-size:11px;background:#e6f4ea;color:#137333;padding:2px 8px;border-radius:10px;">管理员</span>' : '';
+html += '</h3>';
+html += '<div class="detail-grid">';
+html += '<div class="detail-item"><div class="label">邮箱</div><div class="value">' + (u.email || '-') + '</div></div>';
+html += '<div class="detail-item"><div class="label">角色</div><div class="value">' + (u.is_admin ? '管理员' : '普通用户') + '</div></div>';
+html += '<div class="detail-item"><div class="label">注册时间</div><div class="value">' + (u.created_at || '-') + '</div></div>';
+html += '<div class="detail-item"><div class="label">API Keys</div><div class="value">' + (u.api_keys ? u.api_keys.length : 0) + '</div></div>';
+html += '<div class="detail-item"><div class="label">总请求数</div><div class="value">' + (u.stats.total_requests || 0) + '</div></div>';
+html += '<div class="detail-item"><div class="label">总 Tokens</div><div class="value">' + (u.stats.total_tokens || 0) + '</div></div>';
+html += '<div class="detail-item"><div class="label">Prompt Tokens</div><div class="value">' + (u.stats.total_prompt_tokens || 0) + '</div></div>';
+html += '<div class="detail-item"><div class="label">Completion Tokens</div><div class="value">' + (u.stats.total_completion_tokens || 0) + '</div></div>';
+html += '</div>';
+
+if (u.stats.requests_by_model && Object.keys(u.stats.requests_by_model).length > 0) {
+html += '<h4 style="margin:16px 0 8px;font-size:14px;">模型使用分布</h4>';
+var models = u.stats.requests_by_model;
+var mkeys = Object.keys(models);
+mkeys.sort(function(a,b){return models[b]-models[a];});
+mkeys.forEach(function(k) {
+html += '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px;"><span>' + k + '</span><span style="color:var(--blue);">' + models[k] + '</span></div>';
+});
+}
+
+if (u.api_keys && u.api_keys.length > 0) {
+html += '<h4 style="margin:16px 0 8px;font-size:14px;">API Keys</h4>';
+u.api_keys.forEach(function(k) {
+html += '<div class="user-key-row">';
+html += '<span style="font-family:monospace;color:var(--blue);">' + k.api_key + '</span>';
+html += '<span style="color:var(--muted);font-size:11px;">' + (k.note || '') + '</span>';
+html += '<span class="api-key-item key-status ' + (k.is_active ? 'active' : 'inactive') + '">' + (k.is_active ? '活跃' : '禁用') + '</span>';
+html += '</div>';
+});
+}
+
+html += '</div>';
+detailEl.innerHTML = html;
+} catch(e) { console.error('loadUserDetail', e); }
+}
+
+async function toggleAdmin(userId, btn) {
+try {
+var resp = await fetch('/admin/users/' + userId + '/toggle-admin', {method:'POST', credentials:'same-origin'});
+var result = await resp.json();
+if (result.success) loadUsersList();
+} catch(e) { console.error('toggleAdmin', e); }
+}
+
+async function deleteUser(userId, btn) {
+if (!confirm('确定删除该用户及其所有数据？')) return;
+try {
+await fetch('/admin/users/' + userId, {method:'DELETE', credentials:'same-origin'});
+loadUsersList();
+} catch(e) { console.error('deleteUser', e); }
+}
+
+// ===== Modal Functions =====
     function openModal(id) {
         var modal = document.getElementById(id);
         if (modal) {
@@ -2069,9 +2900,17 @@ if (!resp.ok) {
         }
     });
 
-    // ===== Init =====
-    var currentUser = document.cookie.replace(/(?:^|;) *admin_username=([^;]*)(?:;|$)/, '$1') || '用户';
-    function getGreeting() {
+// ===== Init =====
+var currentUser = (document.cookie.match(/(?:^|;\\s*)admin_username=([^;]*)/) || [,'用户'])[1];
+var isAdmin = (document.cookie.match(/(?:^|;\\s*)admin_is_admin=([^;]*)/) || [,'0'])[1] === '1';
+if (!isAdmin) {
+document.querySelectorAll('.nav-item').forEach(function(el) {
+var onclick = el.getAttribute('onclick') || '';
+if (onclick.indexOf('users') > -1 || onclick.indexOf('config') > -1) el.style.display = 'none';
+});
+document.querySelectorAll('.admin-only-btn').forEach(function(el) { el.style.display = 'none'; });
+}
+function getGreeting() {
         var h = new Date().getHours();
         if (h < 6) return '夜深了';
         if (h < 12) return '早上好';
@@ -2079,16 +2918,86 @@ if (!resp.ok) {
         if (h < 18) return '下午好';
         return '晚上好';
     }
-    var greetingEl = document.getElementById('greetingText');
-    if (greetingEl) greetingEl.textContent = getGreeting() + '，' + currentUser;
+var greetingEl = document.getElementById('greetingText');
+if (greetingEl) greetingEl.textContent = getGreeting() + '，' + currentUser;
 
-    // Expose functions to global scope for onclick handlers
-    window.switchTab = switchTab;
-    window.toggleTheme = toggleTheme;
-    window.sendMessage = sendMessage;
-    </script>
+// ===== Image Lightbox =====
+function openImgLightbox(src) {
+var lb = document.getElementById('imgLightbox');
+document.getElementById('lbImg').src = src;
+lb.classList.add('active');
+document.addEventListener('keydown', _lbKeyHandler);
+}
+function closeImgLightbox() {
+  var lb = document.getElementById('imgLightbox');
+  lb.classList.remove('active');
+  document.getElementById('lbImg').src = '';
+  document.removeEventListener('keydown', _lbKeyHandler);
+}
+function _lbKeyHandler(e) { if (e.key === 'Escape') closeImgLightbox(); }
+
+// ===== User Message Actions =====
+function copyMsg(btn) {
+  var msgDiv = btn.closest('.msg.user');
+  var textEl = msgDiv.querySelector('.msg-time');
+  var cloned = msgDiv.cloneNode(true);
+  cloned.querySelectorAll('.msg-actions').forEach(function(el){ el.remove(); });
+  cloned.querySelectorAll('.msg-time').forEach(function(el){ el.remove(); });
+  var text = cloned.textContent.trim();
+  navigator.clipboard.writeText(text).then(function(){
+    btn.textContent = '\u5df2\u590d\u5236';
+    setTimeout(function(){ btn.textContent = '\u590d\u5236'; }, 1500);
+  });
+}
+function editMsg(btn) {
+  var msgDiv = btn.closest('.msg.user');
+  var cloned = msgDiv.cloneNode(true);
+  cloned.querySelectorAll('.msg-actions').forEach(function(el){ el.remove(); });
+  cloned.querySelectorAll('.msg-time').forEach(function(el){ el.remove(); });
+  var text = cloned.textContent.trim();
+  // Find this message's index in chatHistory
+  var msgs = document.getElementById('chatMessages').children;
+  var msgIdx = -1;
+  for (var i = 0; i < msgs.length; i++) {
+    if (msgs[i] === msgDiv) { msgIdx = i; break; }
+  }
+  // Remove all messages from this one onward
+  var toRemove = [];
+  for (var j = msgIdx; j < msgs.length; j++) toRemove.push(msgs[j]);
+  toRemove.forEach(function(el){ el.remove(); });
+  // Truncate chatHistory: count user+assistant pairs up to this point
+  var historyIdx = 0;
+  var count = 0;
+  for (var k = 0; k < chatHistory.length; k++) {
+    if (count >= msgIdx) { historyIdx = k; break; }
+    count++;
+  }
+  if (count < msgIdx) historyIdx = chatHistory.length;
+  chatHistory = chatHistory.slice(0, historyIdx);
+  // Put text back in input
+  var input = document.getElementById('chatInput');
+  input.value = text;
+  input.focus();
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+
+// Expose functions to global scope for onclick handlers
+window.switchTab = switchTab;
+window.toggleTheme = toggleTheme;
+window.sendMessage = sendMessage;
+window.openImgLightbox = openImgLightbox;
+window.closeImgLightbox = closeImgLightbox;
+window.copyMsg = copyMsg;
+window.editMsg = editMsg;
+</script>
+<div class="img-lightbox" id="imgLightbox" onclick="if(event.target===this)closeImgLightbox()">
+<button class="lb-close" onclick="closeImgLightbox()">&times;</button>
+<img id="lbImg" src="" alt="">
+</div>
 </body>
-</html>'''
+</html>"""
+    )
 
 
 @app.get("/admin/login", response_class=HTMLResponse)
@@ -2101,17 +3010,120 @@ async def admin_login(request: Request):
     data = await request.json()
     username = data.get("username", "")
     password = data.get("password", "")
-    
+
     # 使用 PostgreSQL 数据库验证账号密码
     if db and db.authenticate_user(username, password):
         token = generate_session_token()
         _admin_sessions.add(token)
-        response = JSONResponse({"success": True, "message": "登录成功"})
-        response.set_cookie(key="admin_session", value=token, httponly=True, max_age=86400)
-        response.set_cookie(key="admin_username", value=username, httponly=False, max_age=86400)
+        is_admin = db.is_user_admin(username)
+        response = JSONResponse(
+            content={"success": True, "message": "登录成功", "is_admin": is_admin}
+        )
+        response.set_cookie(
+            key="admin_session", value=token, httponly=True, max_age=86400
+        )
+        response.set_cookie(
+            key="admin_username", value=username, httponly=False, max_age=86400
+        )
+        response.set_cookie(
+            key="admin_is_admin",
+            value="1" if is_admin else "0",
+            httponly=False,
+            max_age=86400,
+        )
         return response
     else:
         return {"success": False, "message": "用户名或密码错误"}
+
+
+@app.post("/admin/send-code")
+async def admin_send_code(request: Request):
+    """发送邮箱验证码"""
+    data = await request.json()
+    email = data.get("email", "").strip()
+    if not email or "@" not in email:
+        return {"success": False, "message": "请输入有效邮箱"}
+
+    now = time.time()
+    cached = _verify_codes.get(email)
+    if cached and cached["last_sent"] > now - _VERIFY_CODE_COOLDOWN:
+        remaining = int(_VERIFY_CODE_COOLDOWN - (now - cached["last_sent"]))
+        return {"success": False, "message": f"请{remaining}秒后再发送"}
+
+    import random
+    import string
+
+    code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+    _verify_codes[email] = {
+        "code": code,
+        "expires": now + _VERIFY_CODE_EXPIRE,
+        "last_sent": now,
+    }
+
+    try:
+        mail_url = f"{MAIL_API_URL}?email={EMAIL}&key={MAIL_API_KEY}&mail={email}&title=yjapi验证&name=yjapi&text=欢迎注册使用yjapi. 验证码: {code}. 请尽快注册,验证码有效时间为5分钟."
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(mail_url)
+            try:
+                result = resp.json()
+            except Exception:
+                result = {
+                    "status": "error",
+                    "message": f"API返回非JSON (HTTP {resp.status_code}): {resp.text[:200]}",
+                }
+            print(
+                f"[MAIL] status={resp.status_code} body={json.dumps(result, ensure_ascii=False)[:300]}"
+            )
+            if result.get("status") == "success":
+                return {"success": True, "message": "验证码已发送"}
+            else:
+                _verify_codes.pop(email, None)
+                return {
+                    "success": False,
+                    "message": result.get(
+                        "message", f"邮件发送失败 (HTTP {resp.status_code})"
+                    ),
+                }
+    except Exception as e:
+        print(f"发送邮件失败: {e}")
+        _verify_codes.pop(email, None)
+        return {"success": False, "message": f"邮件发送失败: {e}"}
+
+
+@app.post("/admin/register")
+async def admin_register(request: Request):
+    """注册新用户"""
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+
+    data = await request.json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    email = data.get("email", "").strip()
+    code = data.get("code", "").strip()
+
+    if not username or not password or not email or not code:
+        return {"success": False, "message": "请填写所有字段"}
+    if "@" not in email:
+        return {"success": False, "message": "请输入有效邮箱"}
+    if len(password) < 6:
+        return {"success": False, "message": "密码至少6位"}
+
+    cached = _verify_codes.get(email)
+    if not cached:
+        return {"success": False, "message": "验证码已过期或未发送"}
+    if cached["expires"] < time.time():
+        _verify_codes.pop(email, None)
+        return {"success": False, "message": "验证码已过期"}
+    if cached["code"].upper() != code.upper():
+        return {"success": False, "message": "验证码错误"}
+
+    if db.register_user(username, password, email):
+        _verify_codes.pop(email, None)
+        return {"success": True, "message": "注册成功，请登录"}
+    else:
+        return {"success": False, "message": "用户名已存在"}
 
 
 @app.get("/admin/logout")
@@ -2124,6 +3136,56 @@ async def admin_logout(request: Request):
     return response
 
 
+# ============ 用户管理 API ============
+
+
+def _require_admin(request: Request):
+    """验证登录+管理员权限"""
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    username = request.cookies.get("admin_username", "")
+    if not db or not db.is_user_admin(username):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+@app.get("/admin/users")
+async def admin_list_users(request: Request):
+    _require_admin(request)
+    if not db:
+        return {"data": []}
+    return {"data": db.list_all_users()}
+
+
+@app.get("/admin/users/{user_id}")
+async def admin_get_user(user_id: int, request: Request):
+    _require_admin(request)
+    if not db:
+        return {"data": None}
+    return {"data": db.get_user_detail(user_id)}
+
+
+@app.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: int, request: Request):
+    _require_admin(request)
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+    ok = db.delete_user_data(user_id)
+    return {"success": ok}
+
+
+@app.post("/admin/users/{user_id}/toggle-admin")
+async def admin_toggle_admin(user_id: int, request: Request):
+    _require_admin(request)
+    if not db:
+        return {"success": False, "message": "数据库不可用"}
+    detail = db.get_user_detail(user_id)
+    if not detail:
+        return {"success": False, "message": "用户不存在"}
+    new_val = not detail.get("is_admin", False)
+    ok = db.set_user_admin(user_id, new_val)
+    return {"success": ok, "is_admin": new_val}
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
     if not verify_admin_session(request):
@@ -2133,44 +3195,57 @@ async def admin_page(request: Request):
 
 @app.post("/admin/save")
 async def admin_save(request: Request):
-    if not verify_admin_session(request):
-        raise HTTPException(status_code=401, detail="未登录")
-    
+    _require_admin(request)
+
     global _client
     data = await request.json()
-    
+
     # 处理完整 Cookie 字符串，去除前后空格
     full_cookie = data.get("FULL_COOKIE", "").strip()
     if not full_cookie:
         return {"success": False, "message": "Cookie 是必填项"}
-    
+
     # 解析 Cookie 字符串
     parsed = parse_cookie_string(full_cookie)
-    
+
     if not parsed.get("SECURE_1PSID"):
-        return {"success": False, "message": "Cookie 中未找到 __Secure-1PSID 字段，请确保复制了完整的 Cookie"}
-    
+        return {
+            "success": False,
+            "message": "Cookie 中未找到 __Secure-1PSID 字段，请确保复制了完整的 Cookie",
+        }
+
     # 从页面自动获取 SNLM0E 和 PUSH_ID
     tokens = fetch_tokens_from_page(full_cookie)
-    
+
     if not tokens.get("snlm0e"):
-        return {"success": False, "message": "无法自动获取 AT Token，请检查 Cookie 是否有效或已过期"}
-    
+        return {
+            "success": False,
+            "message": "无法自动获取 AT Token，请检查 Cookie 是否有效或已过期",
+        }
+
     # 更新配置
     _config["FULL_COOKIE"] = full_cookie
     _config["SNLM0E"] = tokens["snlm0e"]
     _config["PUSH_ID"] = tokens.get("push_id", "")
-    
+
     # 从解析结果更新各字段
-    for field in ["SECURE_1PSID", "SECURE_1PSIDTS", "SAPISID", "SID", "HSID", "SSID", "APISID"]:
+    for field in [
+        "SECURE_1PSID",
+        "SECURE_1PSIDTS",
+        "SAPISID",
+        "SID",
+        "HSID",
+        "SSID",
+        "APISID",
+    ]:
         _config[field] = parsed.get(field, "")
-    
+
     # 使用自动获取的模型列表，如果获取失败则使用默认值
     if tokens.get("models"):
         _config["MODELS"] = tokens["models"]
     else:
         _config["MODELS"] = DEFAULT_MODELS.copy()
-    
+
     # 处理模型 ID 配置
     model_ids = data.get("MODEL_IDS", {})
     if model_ids:
@@ -2181,27 +3256,41 @@ async def admin_save(request: Request):
             _config["MODEL_IDS"]["pro"] = model_ids["pro"]
         if model_ids.get("thinking"):
             _config["MODEL_IDS"]["thinking"] = model_ids["thinking"]
-    
+
     save_config()
     _client = None
-    
+
     # 构建结果信息
-    parsed_fields = [k for k in ["SECURE_1PSID", "SECURE_1PSIDTS", "SAPISID", "SID", "HSID", "SSID", "APISID"] if parsed.get(k)]
-    push_id_msg = f"，PUSH_ID ✓" if tokens.get("push_id") else "，PUSH_ID ✗ (图片功能不可用)"
+    parsed_fields = [
+        k
+        for k in [
+            "SECURE_1PSID",
+            "SECURE_1PSIDTS",
+            "SAPISID",
+            "SID",
+            "HSID",
+            "SSID",
+            "APISID",
+        ]
+        if parsed.get(k)
+    ]
+    push_id_msg = (
+        f"，PUSH_ID ✓" if tokens.get("push_id") else "，PUSH_ID ✗ (图片功能不可用)"
+    )
     models_msg = f"，{len(_config['MODELS'])} 个模型" if _config.get("MODELS") else ""
-    
+
     try:
         get_client()
         return {
-            "success": True, 
+            "success": True,
             "message": f"配置已保存并验证成功！AT Token ✓{push_id_msg}{models_msg}",
-            "need_restart": False
+            "need_restart": False,
         }
     except Exception as e:
         return {
-            "success": True, 
+            "success": True,
             "message": f"配置已保存，但连接测试失败: {str(e)[:50]}",
-            "need_restart": False
+            "need_restart": False,
         }
 
 
@@ -2214,19 +3303,18 @@ async def admin_get_config(request: Request):
 
 @app.get("/admin/current-key")
 async def get_current_key(request: Request):
-    """获取当前有效的 API Key"""
-    # 优先从数据库获取第一个有效的 key
-    if ALLOW_DB_API_KEYS and db:
+    """获取当前登录用户的 API Key（确保 webchat 调用统计归属到该用户）"""
+    username = request.cookies.get("admin_username", "")
+    if ALLOW_DB_API_KEYS and db and username:
         try:
-            # 获取任意用户的有效 key
-            keys = db.get_api_keys()
-            for key in keys:
-                if key.get("is_active"):
-                    return {"api_key": key.get("api_key")}
+            user_id = db.get_user_id(username)
+            if user_id:
+                keys = db.get_api_keys()
+                for key in keys:
+                    if key.get("is_active") and key.get("user_id") == user_id:
+                        return {"api_key": key.get("api_key")}
         except Exception as e:
             print(f"[WARN] 获取 API Key 失败: {e}")
-    
-    # 返回环境变量中的 key（即使是空字符串）
     return {"api_key": API_KEY}
 
 
@@ -2235,21 +3323,41 @@ async def admin_get_stats(request: Request):
     """获取全局统计数据"""
     if not verify_admin_session(request):
         return {"error": "未登录"}, 401
-    
+
     # 优先从数据库获取，如果没有则用内存
     if db:
         try:
             stats = db.get_global_stats()
         except Exception:
-            stats = {"total_requests": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_tokens": 0, "requests_by_model": {}, "today_requests": 0, "today_tokens": 0, "recent_24h_requests": 0, "total_errors": 0}
+            stats = {
+                "total_requests": 0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "total_tokens": 0,
+                "requests_by_model": {},
+                "today_requests": 0,
+                "today_tokens": 0,
+                "recent_24h_requests": 0,
+                "total_errors": 0,
+            }
     else:
-        stats = {"total_requests": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_tokens": 0, "requests_by_model": {}, "today_requests": 0, "today_tokens": 0, "recent_24h_requests": 0, "total_errors": 0}
-    
+        stats = {
+            "total_requests": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "requests_by_model": {},
+            "today_requests": 0,
+            "today_tokens": 0,
+            "recent_24h_requests": 0,
+            "total_errors": 0,
+        }
+
     current_time = time.time()
     uptime_seconds = int(current_time - _stats["start_time"])
     uptime_hours = uptime_seconds // 3600
     uptime_mins = (uptime_seconds % 3600) // 60
-    
+
     return {
         "total_requests": stats["total_requests"],
         "total_prompt_tokens": stats["total_prompt_tokens"],
@@ -2268,28 +3376,56 @@ async def admin_get_stats(request: Request):
     }
 
 
+@app.get("/admin/hourly-stats")
+async def admin_get_hourly_stats(request: Request):
+    """获取24小时按小时统计数据"""
+    if not verify_admin_session(request):
+        return {"error": "未登录"}, 401
+    if db:
+        try:
+            return {"data": db.get_hourly_stats_24h()}
+        except Exception:
+            pass
+    return {"data": []}
+
+@app.get("/admin/user-hourly-stats")
+async def admin_get_user_hourly_stats(request: Request):
+    """获取当前登录用户24小时按小时按模型统计"""
+    if not verify_admin_session(request):
+        return {"error": "未登录"}, 401
+    username = request.cookies.get("admin_username", "")
+    if db and username:
+        try:
+            user_id = db.get_user_id(username)
+            if user_id:
+                return {"data": db.get_user_hourly_stats_24h(user_id)}
+        except Exception:
+            pass
+    return {"data": []}
+
+
 @app.post("/admin/api-keys")
 async def admin_create_api_key(request: Request):
     """创建新的API Key"""
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
-    
+
     if not db:
         return {"success": False, "message": "数据库不可用"}
-    
+
     data = await request.json()
     username = request.cookies.get("admin_username", "")
-    
+
     if not username:
         return {"success": False, "message": "无法获取用户信息"}
-    
+
     user_id = db.get_user_id(username)
     if not user_id:
         return {"success": False, "message": "用户不存在"}
-    
+
     note = data.get("note", "")
     result = db.create_api_key(user_id, note)
-    
+
     if result:
         return {"success": True, "data": result}
     return {"success": False, "message": "创建失败"}
@@ -2300,18 +3436,18 @@ async def admin_list_api_keys(request: Request):
     """列出用户的所有API Key"""
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
-    
+
     if not db:
         return []
-    
+
     username = request.cookies.get("admin_username", "")
     if not username:
         return []
-    
+
     user_id = db.get_user_id(username)
     if not user_id:
         return []
-    
+
     keys = db.list_api_keys(user_id)
     for k in keys:
         k["api_key"] = k["api_key"][:10] + "****" + k["api_key"][-4:]
@@ -2323,18 +3459,18 @@ async def admin_delete_api_key(key_id: int, request: Request):
     """删除API Key"""
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
-    
+
     if not db:
         return {"success": False, "message": "数据库不可用"}
-    
+
     username = request.cookies.get("admin_username", "")
     if not username:
         return {"success": False, "message": "无法获取用户信息"}
-    
+
     user_id = db.get_user_id(username)
     if not user_id:
         return {"success": False, "message": "用户不存在"}
-    
+
     success = db.delete_api_key(user_id, key_id)
     return {"success": success}
 
@@ -2344,25 +3480,94 @@ async def admin_toggle_api_key(key_id: int, request: Request):
     """启用/禁用API Key"""
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
-    
+
     if not db:
         return {"success": False, "message": "数据库不可用"}
-    
+
     username = request.cookies.get("admin_username", "")
     if not username:
         return {"success": False, "message": "无法获取用户信息"}
-    
+
     user_id = db.get_user_id(username)
     if not user_id:
         return {"success": False, "message": "用户不存在"}
-    
+
     is_active = db.toggle_api_key(user_id, key_id)
     if is_active is not None:
         return {"success": True, "is_active": is_active}
     return {"success": False, "message": "操作失败"}
 
 
+# ============ 用户 Prompt/Skill 管理 API ============
+
+
+def _get_admin_user_id(request: Request):
+    if not verify_admin_session(request):
+        return None
+    username = request.cookies.get("admin_username", "")
+    if not username or not db:
+        return None
+    return db.get_user_id(username)
+
+
+@app.get("/admin/prompts/{ptype}")
+async def admin_list_prompts(ptype: str, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"data": db.list_prompts(uid, ptype)}
+
+
+@app.post("/admin/prompts/{ptype}")
+async def admin_create_prompt(ptype: str, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    data = await request.json()
+    pid = db.create_prompt(uid, ptype, data.get("title", ""), data.get("content", ""))
+    if pid:
+        return {"success": True, "id": pid}
+    return {"success": False, "message": "创建失败"}
+
+
+@app.put("/admin/prompts/{ptype}/{prompt_id}")
+async def admin_update_prompt(ptype: str, prompt_id: int, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    data = await request.json()
+    ok = db.update_prompt(uid, prompt_id, data.get("title"), data.get("content"))
+    return {"success": ok}
+
+
+@app.delete("/admin/prompts/{ptype}/{prompt_id}")
+async def admin_delete_prompt(ptype: str, prompt_id: int, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    ok = db.delete_prompt(uid, prompt_id)
+    return {"success": ok}
+
+
+@app.post("/admin/prompts/{ptype}/{prompt_id}/activate")
+async def admin_activate_prompt(ptype: str, prompt_id: int, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    ok = db.set_active_prompt(uid, prompt_id, ptype)
+    return {"success": ok}
+
+
+@app.get("/admin/prompts/{ptype}/active")
+async def admin_get_active_prompt(ptype: str, request: Request):
+    uid = _get_admin_user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"data": db.get_active_prompt(uid, ptype)}
+
+
 # ============ API 路由 ============
+
 
 class ChatMessage(BaseModel):
     role: str
@@ -2370,7 +3575,7 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
-    
+
     class Config:
         extra = "ignore"
 
@@ -2380,9 +3585,11 @@ class FunctionDefinition(BaseModel):
     description: Optional[str] = None
     parameters: Optional[Dict[str, Any]] = None
 
+
 class ToolDefinition(BaseModel):
     type: str = "function"
     function: FunctionDefinition
+
 
 class ChatCompletionRequest(BaseModel):
     model: str = "gemini"
@@ -2402,7 +3609,7 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     n: Optional[int] = None
     user: Optional[str] = None
-    
+
     class Config:
         extra = "ignore"  # 忽略未定义的额外字段
 
@@ -2482,9 +3689,9 @@ def verify_api_key(authorization: str = Header(None), db=None):
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    
+
     token = authorization[7:]
-    
+
     # 优先检查数据库（如果可用）
     if ALLOW_DB_API_KEYS and db:
         try:
@@ -2493,11 +3700,11 @@ def verify_api_key(authorization: str = Header(None), db=None):
                 return {"user_id": result["user_id"], "key_id": result["key_id"]}
         except Exception:
             pass  # 数据库不可用时跳过
-    
+
     # 兼容旧版单key
     if API_KEY and token == API_KEY:
         return {"user_id": 0, "key_id": 0}
-    
+
     raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -2515,7 +3722,10 @@ async def list_models(authorization: str = Header(None)):
     created = int(time.time())
     return {
         "object": "list",
-        "data": [{"id": m, "object": "model", "created": created, "owned_by": "google"} for m in models]
+        "data": [
+            {"id": m, "object": "model", "created": created, "owned_by": "google"}
+            for m in models
+        ],
     }
 
 
@@ -2538,8 +3748,10 @@ async def token_status_api(authorization: str = Header(None)):
     """查看 token 状态 API"""
     verify_api_key(authorization, db)
     current_time = time.time()
-    time_since_refresh = int(current_time - _last_token_refresh) if _last_token_refresh > 0 else -1
-    
+    time_since_refresh = (
+        int(current_time - _last_token_refresh) if _last_token_refresh > 0 else -1
+    )
+
     return {
         "auto_refresh_enabled": TOKEN_AUTO_REFRESH,
         "background_refresh_enabled": TOKEN_BACKGROUND_REFRESH,
@@ -2563,11 +3775,12 @@ async def reset_client_api(authorization: str = Header(None)):
 def log_api_call(request_data: dict, response_data: dict, error: str = None):
     """记录 API 调用日志到文件"""
     import datetime
+
     log_entry = {
         "timestamp": datetime.datetime.now().isoformat(),
         "request": request_data,
         "response": response_data,
-        "error": error
+        "error": error,
     }
     try:
         with open("api_logs.json", "a", encoding="utf-8") as f:
@@ -2584,13 +3797,15 @@ def get_user_messages_hash(messages: list) -> str:
     """计算所有用户消息的 hash，用于判断是否是同一会话"""
     content_str = ""
     for m in messages:
-        role = m.role if hasattr(m, 'role') else m.get('role', '')
+        role = m.role if hasattr(m, "role") else m.get("role", "")
         if role != "user":
             continue
-        content = m.content if hasattr(m, 'content') else m.get('content', '')
+        content = m.content if hasattr(m, "content") else m.get("content", "")
         if isinstance(content, list):
             # 对于包含图片的消息，只取文本部分
-            text_parts = [item.get('text', '') for item in content if item.get('type') == 'text']
+            text_parts = [
+                item.get("text", "") for item in content if item.get("type") == "text"
+            ]
             content_str += f"{' '.join(text_parts)}|"
         else:
             content_str += f"{content}|"
@@ -2600,7 +3815,7 @@ def get_user_messages_hash(messages: list) -> str:
 def is_continuation(current_messages: list, last_hash: str) -> bool:
     """
     判断当前请求是否是上一次对话的延续
-    
+
     逻辑：如果当前消息去掉最后一条用户消息后的 hash 等于上次的 hash，
     说明是同一对话的延续
     """
@@ -2614,15 +3829,18 @@ def is_continuation(current_messages: list, last_hash: str) -> bool:
     # OpenCode 的工具链路会在同一轮对话中插入 assistant/tool 消息。
     # 只要存在这些消息，就应当视为同一会话继续，而不是重置上下文。
     has_assistant_or_tool = any(
-        (m.role if hasattr(m, 'role') else m.get('role', '')) in {"assistant", "tool"}
+        (m.role if hasattr(m, "role") else m.get("role", "")) in {"assistant", "tool"}
         for m in current_messages
     )
     if has_assistant_or_tool:
         return True
-    
+
     # 找到所有用户消息
-    user_indices = [i for i, m in enumerate(current_messages)
-                    if (m.role if hasattr(m, 'role') else m.get('role', '')) == "user"]
+    user_indices = [
+        i
+        for i, m in enumerate(current_messages)
+        if (m.role if hasattr(m, "role") else m.get("role", "")) == "user"
+    ]
 
     if len(user_indices) <= 1:
         # 只有一条用户消息，视为新对话
@@ -2636,9 +3854,17 @@ def is_continuation(current_messages: list, last_hash: str) -> bool:
     return prev_hash == last_hash
 
 
-async def proxy_chat_completions(request: ChatCompletionRequest, authorization: str, db_manager, user_id: int, key_id: int):
-    """代理请求到外部 API（deepseek、minimax、glm 等）"""
-    if not EXTERNAL_API_URL or not EXTERNAL_API_KEY:
+async def proxy_chat_completions(
+    request: ChatCompletionRequest,
+    authorization: str,
+    db_manager,
+    user_id: int,
+    key_id: int,
+    api_url: str,
+    api_key: str,
+):
+    """代理请求到外部 API"""
+    if not api_url or not api_key:
         raise HTTPException(status_code=500, detail="外部 API 未配置")
 
     # 转换消息格式为外部 API 格式
@@ -2677,7 +3903,7 @@ async def proxy_chat_completions(request: ChatCompletionRequest, authorization: 
 
     try:
         headers = {
-            "Authorization": f"Bearer {EXTERNAL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
@@ -2685,7 +3911,7 @@ async def proxy_chat_completions(request: ChatCompletionRequest, authorization: 
         if not request.stream:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
-                    f"{EXTERNAL_API_URL}/chat/completions",
+                    f"{api_url}/chat/completions",
                     json=payload,
                     headers=headers,
                 )
@@ -2694,25 +3920,50 @@ async def proxy_chat_completions(request: ChatCompletionRequest, authorization: 
 
                 if "usage" in result:
                     try:
-                        db_manager.record_usage(user_id, key_id, request.model,
+                        db_manager.record_usage(
+                            user_id,
+                            key_id,
+                            request.model,
                             result["usage"].get("prompt_tokens", 0),
-                            result["usage"].get("completion_tokens", 0))
+                            result["usage"].get("completion_tokens", 0),
+                        )
                     except Exception:
                         pass
                 return JSONResponse(content=result)
 
-        # 流式请求：直接透传 SSE
+        # 流式请求：透传 SSE 并记录 usage
         async def stream_response():
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as stream_client:
+            collected = ""
+            async with httpx.AsyncClient(
+                timeout=120.0, follow_redirects=True
+            ) as stream_client:
                 async with stream_client.stream(
                     "POST",
-                    f"{EXTERNAL_API_URL}/chat/completions",
+                    f"{api_url}/chat/completions",
                     json=payload,
                     headers=headers,
                 ) as stream_resp:
                     async for chunk in stream_resp.aiter_text():
                         if chunk:
+                            collected += chunk
                             yield chunk
+            # 流结束后从 collected SSE 数据中提取 usage
+            try:
+                for line in collected.split("\n"):
+                    line = line.strip()
+                    if line.startswith("data: ") and line[6:] != "[DONE]":
+                        d = json.loads(line[6:])
+                        if d.get("usage"):
+                            db_manager.record_usage(
+                                user_id,
+                                key_id,
+                                request.model,
+                                d["usage"].get("prompt_tokens", 0),
+                                d["usage"].get("completion_tokens", 0),
+                            )
+                            break
+            except Exception:
+                pass
 
         return StreamingResponse(
             stream_response(),
@@ -2721,11 +3972,14 @@ async def proxy_chat_completions(request: ChatCompletionRequest, authorization: 
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
-            }
+            },
         )
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=f"外部 API 错误: {e.response.text}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"外部 API 错误: {e.response.text}",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"代理请求失败: {str(e)}")
 
@@ -2734,7 +3988,7 @@ async def proxy_chat_completions(request: ChatCompletionRequest, authorization: 
 async def chat_completions(
     request: ChatCompletionRequest,
     authorization: str = Header(None),
-    session_id: str = None
+    session_id: str = None,
 ):
     global _last_user_messages_hash
 
@@ -2745,20 +3999,58 @@ async def chat_completions(
 
     # 代理模型：直接转发到外部 API
     if request.model in PROXY_MODELS and EXTERNAL_API_URL:
-        return await proxy_chat_completions(request, authorization, db, user_id, key_id)
+        return await proxy_chat_completions(
+            request,
+            authorization,
+            db,
+            user_id,
+            key_id,
+            EXTERNAL_API_URL,
+            EXTERNAL_API_KEY,
+        )
+    if request.model in PROXY_MODELS_4 and EXTERNAL_API_URL:
+        return await proxy_chat_completions(
+            request,
+            authorization,
+            db,
+            user_id,
+            key_id,
+            EXTERNAL_API_URL,
+            EXTERNAL_API_KEY_4 or EXTERNAL_API_KEY,
+        )
+    if request.model in PROXY_MODELS_2 and EXTERNAL_API_URL_2:
+        return await proxy_chat_completions(
+            request,
+            authorization,
+            db,
+            user_id,
+            key_id,
+            EXTERNAL_API_URL_2,
+            EXTERNAL_API_KEY_2,
+        )
+    if request.model in PROXY_MODELS_3 and EXTERNAL_API_URL_3:
+        return await proxy_chat_completions(
+            request,
+            authorization,
+            db,
+            user_id,
+            key_id,
+            EXTERNAL_API_URL_3,
+            EXTERNAL_API_KEY_3,
+        )
 
     # 如果提供了 session_id，使用它作为独立的 session 标识
     if session_id:
         user_id = hash(session_id) % 1000000
         if user_id < 0:
             user_id = -user_id
-    
+
     # 记录请求入参 (图片内容截断显示)
     request_log = {
         "model": request.model,
         "stream": request.stream,
         "messages": [],
-        "tools": [t.model_dump() for t in request.tools] if request.tools else None
+        "tools": [t.model_dump() for t in request.tools] if request.tools else None,
     }
     image_count = 0
     for m in request.messages:
@@ -2786,31 +4078,33 @@ async def chat_completions(
                         img_format = "url"
                     else:
                         img_format = "unknown"
-                    content_log.append({
-                        "type": "image_url", 
-                        "format": img_format,
-                        "url_preview": url[:100] + "..." if len(url) > 100 else url
-                    })
+                    content_log.append(
+                        {
+                            "type": "image_url",
+                            "format": img_format,
+                            "url_preview": url[:100] + "..." if len(url) > 100 else url,
+                        }
+                    )
                 else:
                     content_log.append(item)
             msg_log["content"] = content_log
         else:
             msg_log["content"] = m.content
         request_log["messages"].append(msg_log)
-    
+
     # 打印图片接收情况
     if image_count > 0:
         print(f"📷 收到 {image_count} 张图片")
-    
+
     try:
         # 检查是否是新会话（用户消息 hash 变化），如果是则重置 client
         if not is_continuation(request.messages, _last_user_messages_hash):
             if _last_user_messages_hash:  # 有历史 hash 但不匹配，说明是新对话
                 print(f"[SESSION] 检测到新会话，重置 client")
                 reset_client()
-        
+
         client = get_client()
-        
+
         # 处理消息
         messages = []
         for m in request.messages:
@@ -2836,13 +4130,13 @@ async def chat_completions(
                 messages = [{"role": "system", "content": tools_prompt}] + messages
 
         _last_user_messages_hash = get_user_messages_hash(request.messages)
-        
+
         # 统一走非流式拿到完整响应，解析 tool_calls，再以 SSE 推流
         response = client.chat(messages=messages, model=request.model)
         reply_content = response.choices[0].message.content
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created_time = int(time.time())
-        
+
         # 解析工具调用和思考过程（无论是否有 tools 都提取 thinking）
         tool_calls, final_content, gemini_thinking = parse_tool_calls(reply_content)
         if not request.tools:
@@ -2852,35 +4146,44 @@ async def chat_completions(
         if request.tools and not tool_calls:
             # 尝试更宽松的匹配：在整段回复中找 opencode 相关的 JSON
             import re as re_loose
+
             try:
                 # 先找 opencode 关键字附近的 JSON 块
                 lower = reply_content.lower()
-                idx = lower.find('opencode')
+                idx = lower.find("opencode")
                 if idx >= 0:
-                    snippet = reply_content[max(0, idx-50):idx+500]
+                    snippet = reply_content[max(0, idx - 50) : idx + 500]
                     # 提取大括号内的 JSON
-                    brace_start = snippet.find('{')
+                    brace_start = snippet.find("{")
                     if brace_start >= 0:
                         depth = 0
                         for i in range(brace_start, len(snippet)):
-                            if snippet[i] == '{':
+                            if snippet[i] == "{":
                                 depth += 1
-                            elif snippet[i] == '}':
+                            elif snippet[i] == "}":
                                 depth -= 1
                                 if depth == 0:
-                                    blob = snippet[brace_start:i+1]
+                                    blob = snippet[brace_start : i + 1]
                                     try:
                                         data = json.loads(blob)
-                                        if isinstance(data, dict) and data.get('name', '').lower() == 'opencode':
-                                            args = data.get('arguments', {})
-                                            tool_calls.append({
-                                                "id": f"call_{uuid.uuid4().hex[:8]}",
-                                                "type": "function",
-                                                "function": {
-                                                    "name": "opencode",
-                                                    "arguments": json.dumps(args, ensure_ascii=False)
+                                        if (
+                                            isinstance(data, dict)
+                                            and data.get("name", "").lower()
+                                            == "opencode"
+                                        ):
+                                            args = data.get("arguments", {})
+                                            tool_calls.append(
+                                                {
+                                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "opencode",
+                                                        "arguments": json.dumps(
+                                                            args, ensure_ascii=False
+                                                        ),
+                                                    },
                                                 }
-                                            })
+                                            )
                                     except:
                                         pass
                                     break
@@ -2889,26 +4192,35 @@ async def chat_completions(
             if tool_calls:
                 final_content = None
 
-# 流式响应
+        # 流式响应
         if request.stream:
+
             async def generate_stream():
                 chunk_data = ChatCompletionChunkResponse(
                     id=completion_id,
                     created=created_time,
                     model=request.model,
-                    choices=[ChatCompletionChunkChoice(
-                        index=0,
-                        delta={"role": "assistant"},
-                        finish_reason=None
-                    )]
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            index=0, delta={"role": "assistant"}, finish_reason=None
+                        )
+                    ],
                 )
                 yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
 
                 # send thinking content as reasoning_content delta
                 if gemini_thinking:
                     think_chunk = ChatCompletionChunkResponse(
-                        id=completion_id, created=created_time, model=request.model,
-                        choices=[ChatCompletionChunkChoice(index=0, delta={"reasoning_content": gemini_thinking}, finish_reason=None)]
+                        id=completion_id,
+                        created=created_time,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta={"reasoning_content": gemini_thinking},
+                                finish_reason=None,
+                            )
+                        ],
                     )
                     yield f"data: {json.dumps(think_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
@@ -2919,36 +4231,44 @@ async def chat_completions(
                             id=completion_id,
                             created=created_time,
                             model=request.model,
-                            choices=[ChatCompletionChunkChoice(
-                                index=0,
-                                delta={
-                                    "tool_calls": [{
-                                        "index": 0,
-                                        "id": tc.get("id"),
-                                        "type": tc.get("type", "function"),
-                                        "function": {
-                                            "name": fn.get("name"),
-                                            "arguments": fn.get("arguments", "")
-                                        }
-                                    }]
-                                },
-                                finish_reason=None
-                            )]
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta={
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": tc.get("id"),
+                                                "type": tc.get("type", "function"),
+                                                "function": {
+                                                    "name": fn.get("name"),
+                                                    "arguments": fn.get(
+                                                        "arguments", ""
+                                                    ),
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    finish_reason=None,
+                                )
+                            ],
                         )
                         yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
                 else:
                     # 模拟流式：逐字输出
                     for i in range(0, len(final_content), 3):
-                        chunk_text = final_content[i:i+3]
+                        chunk_text = final_content[i : i + 3]
                         chunk_data = ChatCompletionChunkResponse(
                             id=completion_id,
                             created=created_time,
                             model=request.model,
-                            choices=[ChatCompletionChunkChoice(
-                                index=0,
-                                delta={"content": chunk_text},
-                                finish_reason=None
-                            )]
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta={"content": chunk_text},
+                                    finish_reason=None,
+                                )
+                            ],
                         )
                         yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
                         await asyncio.sleep(0.02)
@@ -2957,17 +4277,22 @@ async def chat_completions(
                     id=completion_id,
                     created=created_time,
                     model=request.model,
-                    choices=[ChatCompletionChunkChoice(
-                        index=0,
-                        delta={},
-                        finish_reason="tool_calls" if tool_calls else "stop"
-                    )]
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            index=0,
+                            delta={},
+                            finish_reason="tool_calls" if tool_calls else "stop",
+                        )
+                    ],
                 )
                 yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
             if tool_calls:
-                response_message = ChatCompletionResponseMessage(content=final_content if final_content else None, tool_calls=tool_calls)
+                response_message = ChatCompletionResponseMessage(
+                    content=final_content if final_content else None,
+                    tool_calls=tool_calls,
+                )
             else:
                 response_message = ChatCompletionResponseMessage(content=final_content)
 
@@ -2975,8 +4300,18 @@ async def chat_completions(
                 id=completion_id,
                 created=created_time,
                 model=request.model,
-                choices=[ChatCompletionChoice(index=0, message=response_message, finish_reason="tool_calls" if tool_calls else "stop")],
-                usage=Usage(prompt_tokens=response.usage.prompt_tokens, completion_tokens=response.usage.completion_tokens, total_tokens=response.usage.total_tokens)
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=response_message,
+                        finish_reason="tool_calls" if tool_calls else "stop",
+                    )
+                ],
+                usage=Usage(
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                ),
             )
             log_api_call(request_log, response_data.model_dump())
 
@@ -2984,10 +4319,18 @@ async def chat_completions(
             _stats["total_prompt_tokens"] += response.usage.prompt_tokens
             _stats["total_completion_tokens"] += response.usage.completion_tokens
             _stats["total_tokens"] += response.usage.total_tokens
-            _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
+            _stats["requests_by_model"][request.model] = (
+                _stats["requests_by_model"].get(request.model, 0) + 1
+            )
 
             try:
-                db.record_usage(user_id, key_id, request.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+                db.record_usage(
+                    user_id,
+                    key_id,
+                    request.model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
             except Exception:
                 pass
 
@@ -2998,25 +4341,35 @@ async def chat_completions(
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
-                }
+                },
             )
-        
+
         # 构建响应消息
         if tool_calls:
-            response_message = ChatCompletionResponseMessage(content=final_content if final_content else None, tool_calls=tool_calls)
+            response_message = ChatCompletionResponseMessage(
+                content=final_content if final_content else None, tool_calls=tool_calls
+            )
             finish_reason = "tool_calls"
         else:
             response_message = ChatCompletionResponseMessage(content=final_content)
             finish_reason = "stop"
-        
+
         response_data = ChatCompletionResponse(
             id=completion_id,
             created=created_time,
             model=request.model,
-            choices=[ChatCompletionChoice(index=0, message=response_message, finish_reason=finish_reason)],
-            usage=Usage(prompt_tokens=response.usage.prompt_tokens, completion_tokens=response.usage.completion_tokens, total_tokens=response.usage.total_tokens)
+            choices=[
+                ChatCompletionChoice(
+                    index=0, message=response_message, finish_reason=finish_reason
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                total_tokens=response.usage.total_tokens,
+            ),
         )
-        
+
         log_api_call(request_log, response_data.model_dump())
 
         # 更新内存统计
@@ -3024,44 +4377,64 @@ async def chat_completions(
         _stats["total_prompt_tokens"] += response.usage.prompt_tokens
         _stats["total_completion_tokens"] += response.usage.completion_tokens
         _stats["total_tokens"] += response.usage.total_tokens
-        _stats["requests_by_model"][request.model] = _stats["requests_by_model"].get(request.model, 0) + 1
-        
+        _stats["requests_by_model"][request.model] = (
+            _stats["requests_by_model"].get(request.model, 0) + 1
+        )
+
         # 更新数据库统计
         try:
-            db.record_usage(user_id, key_id, request.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+            db.record_usage(
+                user_id,
+                key_id,
+                request.model,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            )
         except Exception:
             pass
-        
+
         return JSONResponse(
             content=response_data.model_dump(),
             headers={
                 "Cache-Control": "no-cache",
                 "X-Request-Id": completion_id,
-            }
+            },
         )
     except HTTPException:
         raise
     except Exception as e:
         import traceback
+
         error_msg = str(e)
-        
+
         # 检测是否是 token 过期错误
-        is_token_error = any(keyword in error_msg.lower() for keyword in [
-            'cookie', 'expired', '过期', '401', '403', 'unauthorized', 
-            'push_id', 'snlm0e', 'upload_id', '认证失败'
-        ])
-        
+        is_token_error = any(
+            keyword in error_msg.lower()
+            for keyword in [
+                "cookie",
+                "expired",
+                "过期",
+                "401",
+                "403",
+                "unauthorized",
+                "push_id",
+                "snlm0e",
+                "upload_id",
+                "认证失败",
+            ]
+        )
+
         if is_token_error:
             print(f"[WARN] 检测到 token 可能过期，尝试自动刷新...")
             refresh_result = try_refresh_tokens(force=True)
-            
+
             if refresh_result["success"]:
                 # 刷新成功，重置 client 并提示用户重试
                 reset_client()
                 error_msg = f"Token 已自动刷新，请重试请求。原错误: {error_msg}"
             else:
                 error_msg = f"Token 刷新失败 ({refresh_result['message']})，请手动更新 Cookie。原错误: {error_msg}"
-        
+
         print(f"[ERROR] Chat error: {error_msg}")
         traceback.print_exc()
         log_api_call(request_log, None, error=error_msg)
@@ -3085,7 +4458,11 @@ async def reset_context(authorization: str = Header(None)):
 load_config()
 
 if __name__ == "__main__":
-    api_key_display = os.getenv("API_KEY", "")[:20] + "..." if os.getenv("API_KEY") else "未设置(请通过数据库)"
+    api_key_display = (
+        os.getenv("API_KEY", "")[:20] + "..."
+        if os.getenv("API_KEY")
+        else "未设置(请通过数据库)"
+    )
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║           Gemini OpenAI Compatible API Server            ║

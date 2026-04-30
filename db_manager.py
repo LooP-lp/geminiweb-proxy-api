@@ -36,9 +36,27 @@ class DBManager:
                         id SERIAL PRIMARY KEY,
                         username VARCHAR(50) UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
+                        email VARCHAR(200) DEFAULT '',
+                        is_admin BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                # migrate: add email column if missing
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='email'
+                """)
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE users ADD COLUMN email VARCHAR(200) DEFAULT ''")
+                # migrate: add is_admin column if missing
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='is_admin'
+                """)
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE")
+                # first user becomes admin
+                cur.execute("UPDATE users SET is_admin = TRUE WHERE id = (SELECT MIN(id) FROM users) AND is_admin = FALSE")
                 # api_keys 表
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS api_keys (
@@ -53,12 +71,12 @@ class DBManager:
                 """)
                 # 迁移旧字段大小
                 cur.execute("""
-                    SELECT column_name FROM information_schema.columns 
+                    SELECT column_name FROM information_schema.columns
                     WHERE table_name='api_keys' AND column_name='api_key'
                 """)
                 if cur.fetchone():
                     cur.execute("ALTER TABLE api_keys ALTER COLUMN api_key TYPE VARCHAR(52)")
-                # usage_stats 表 (按用户+模型维度聚合)
+                # usage_stats 表
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS usage_stats (
                         id SERIAL PRIMARY KEY,
@@ -73,7 +91,7 @@ class DBManager:
                         UNIQUE(user_id, api_key_id, model, date)
                     );
                 """)
-                # request_log 表 (详细请求日志)
+                # request_log 表
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS request_log (
                         id SERIAL PRIMARY KEY,
@@ -88,22 +106,38 @@ class DBManager:
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                # user_prompts 表
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_prompts (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        type VARCHAR(20) NOT NULL DEFAULT 'prompt',
+                        title VARCHAR(200) NOT NULL DEFAULT '',
+                        content TEXT NOT NULL DEFAULT '',
+                        is_active BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
         except Exception as e:
             print(f"创建表失败: {e}")
 
     # ============ 用户管理 ============
 
-    def register_user(self, username, password):
+    def register_user(self, username, password, email=""):
         """注册新用户：对密码进行加盐哈希处理后存储"""
         salt = bcrypt.gensalt()
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt)
         try:
             with self.conn.cursor() as cur:
+                is_first = cur.execute("SELECT COUNT(*) FROM users")
+                count = cur.fetchone()[0]
+                is_admin = count == 0
                 cur.execute(
-                    "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
-                    (username, hashed_password.decode('utf-8'))
+                    "INSERT INTO users (username, password_hash, email, is_admin) VALUES (%s, %s, %s, %s)",
+                    (username, hashed_password.decode('utf-8'), email, is_admin)
                 )
-            return True
+                return True
         except psycopg2.IntegrityError:
             print(f"用户 {username} 已存在")
             return False
@@ -137,30 +171,53 @@ class DBManager:
             print(f"获取用户ID失败: {e}")
             return None
 
+    def is_user_admin(self, username):
+        """检查用户是否是管理员"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT is_admin FROM users WHERE username = %s", (username,))
+                result = cur.fetchone()
+                return result and result[0]
+        except Exception as e:
+            print(f"检查管理员权限失败: {e}")
+            return False
+
+    def set_user_admin(self, user_id, is_admin):
+        """设置用户管理员权限"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE users SET is_admin = %s WHERE id = %s", (is_admin, user_id))
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"设置管理员权限失败: {e}")
+            return False
+
     def list_all_users(self):
         """列出所有用户及完整信息"""
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        u.id, u.username, u.created_at,
+                    SELECT
+                        u.id, u.username, u.email, u.is_admin, u.created_at,
                         COUNT(DISTINCT k.id) as key_count,
                         COALESCE(SUM(us.request_count), 0) as total_requests,
                         COALESCE(SUM(us.total_tokens), 0) as total_tokens
                     FROM users u
                     LEFT JOIN api_keys k ON k.user_id = u.id
                     LEFT JOIN usage_stats us ON us.user_id = u.id
-                    GROUP BY u.id, u.username, u.created_at
+                    GROUP BY u.id, u.username, u.email, u.is_admin, u.created_at
                     ORDER BY u.id
                 """)
                 rows = cur.fetchall()
                 return [{
-                    "id": r[0], 
-                    "username": r[1], 
-                    "created_at": r[2].isoformat(),
-                    "key_count": r[3],
-                    "total_requests": r[4],
-                    "total_tokens": r[5]
+                    "id": r[0],
+                    "username": r[1],
+                    "email": r[2] or "",
+                    "is_admin": r[3],
+                    "created_at": r[4].isoformat() if r[4] else None,
+                    "key_count": r[5],
+                    "total_requests": r[6],
+                    "total_tokens": r[7]
                 } for r in rows]
         except Exception as e:
             print(f"获取用户列表失败: {e}")
@@ -307,19 +364,17 @@ class DBManager:
         total = prompt_tokens + completion_tokens
         try:
             with self.conn.cursor() as cur:
-                # 更新聚合统计 (upsert)
                 cur.execute("""
                     INSERT INTO usage_stats (user_id, api_key_id, model, request_count, prompt_tokens, completion_tokens, total_tokens, date)
                     VALUES (%s, %s, %s, 1, %s, %s, %s, CURRENT_DATE)
                     ON CONFLICT (user_id, api_key_id, model, date)
                     DO UPDATE SET
-                        request_count = usage_stats.request_count + 1,
-                        prompt_tokens = usage_stats.prompt_tokens + EXCLUDED.prompt_tokens,
-                        completion_tokens = usage_stats.completion_tokens + EXCLUDED.completion_tokens,
-                        total_tokens = usage_stats.total_tokens + EXCLUDED.total_tokens
+                    request_count = usage_stats.request_count + 1,
+                    prompt_tokens = usage_stats.prompt_tokens + EXCLUDED.prompt_tokens,
+                    completion_tokens = usage_stats.completion_tokens + EXCLUDED.completion_tokens,
+                    total_tokens = usage_stats.total_tokens + EXCLUDED.total_tokens
                 """, (user_id, api_key_id, model, prompt_tokens, completion_tokens, total))
 
-                # 插入详细日志
                 cur.execute("""
                     INSERT INTO request_log (user_id, api_key_id, model, prompt_tokens, completion_tokens, total_tokens)
                     VALUES (%s, %s, %s, %s, %s, %s)
@@ -328,7 +383,6 @@ class DBManager:
             print(f"记录使用统计失败: {e}")
 
     def record_error(self, user_id, api_key_id, model, error_message):
-        """记录一次失败的API调用"""
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
@@ -390,17 +444,76 @@ class DBManager:
                     "today_requests": int(today[0]),
                     "today_tokens": int(today[1]),
                     "recent_24h_requests": int(recent_24h),
-                    "total_errors": int(error_count),
-                }
+            "total_errors": int(error_count),
+            }
         except Exception as e:
             print(f"获取统计失败: {e}")
             return {
                 "total_requests": 0, "total_prompt_tokens": 0,
                 "total_completion_tokens": 0, "total_tokens": 0,
                 "requests_by_model": {}, "today_requests": 0,
-                "today_tokens": 0, "recent_24h_requests": 0,
-                "total_errors": 0,
+                "today_tokens": 0, "recent_24h_requests": 0, "total_errors": 0,
             }
+
+    def get_hourly_stats_24h(self):
+        """获取过去24小时的按小时统计数据（用于折线图）"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') as hour,
+                        COUNT(*) as requests,
+                        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+                        COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+                        COALESCE(SUM(total_tokens), 0) as total_tokens
+                    FROM request_log
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+                rows = cur.fetchall()
+            result = []
+            for r in rows:
+                result.append({
+                    "hour": int(r[0]),
+                    "requests": int(r[1]),
+                    "prompt_tokens": int(r[2]),
+                    "completion_tokens": int(r[3]),
+                    "total_tokens": int(r[4]),
+                })
+            return result
+        except Exception as e:
+            print(f"获取24小时统计失败: {e}")
+            return []
+
+    def get_user_hourly_stats_24h(self, user_id):
+        """获取某用户过去24小时的按小时统计（按模型分组）"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') as hour,
+                        model,
+                        COUNT(*) as requests,
+                        COALESCE(SUM(total_tokens), 0) as total_tokens
+                    FROM request_log
+                    WHERE user_id = %s AND created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                    GROUP BY hour, model
+                    ORDER BY hour, model
+                """, (user_id,))
+                rows = cur.fetchall()
+            result = []
+            for r in rows:
+                result.append({
+                    "hour": int(r[0]),
+                    "model": r[1],
+                    "requests": int(r[2]),
+                    "total_tokens": int(r[3]),
+                })
+            return result
+        except Exception as e:
+            print(f"获取用户24小时统计失败: {e}")
+            return []
 
     def get_user_stats(self, user_id):
         """获取某用户的统计数据"""
@@ -408,9 +521,9 @@ class DBManager:
             with self.conn.cursor() as cur:
                 cur.execute("""
                     SELECT COALESCE(SUM(request_count),0),
-                           COALESCE(SUM(prompt_tokens),0),
-                           COALESCE(SUM(completion_tokens),0),
-                           COALESCE(SUM(total_tokens),0)
+                    COALESCE(SUM(prompt_tokens),0),
+                    COALESCE(SUM(completion_tokens),0),
+                    COALESCE(SUM(total_tokens),0)
                     FROM usage_stats WHERE user_id = %s
                 """, (user_id,))
                 total = cur.fetchone()
@@ -422,13 +535,13 @@ class DBManager:
                 """, (user_id,))
                 by_model = {r[0]: int(r[1]) for r in cur.fetchall()}
 
-                return {
-                    "total_requests": int(total[0]),
-                    "total_prompt_tokens": int(total[1]),
-                    "total_completion_tokens": int(total[2]),
-                    "total_tokens": int(total[3]),
-                    "requests_by_model": by_model,
-                }
+            return {
+                "total_requests": int(total[0]),
+                "total_prompt_tokens": int(total[1]),
+                "total_completion_tokens": int(total[2]),
+                "total_tokens": int(total[3]),
+                "requests_by_model": by_model,
+            }
         except Exception as e:
             print(f"获取用户统计失败: {e}")
             return {
@@ -437,6 +550,120 @@ class DBManager:
                 "requests_by_model": {},
             }
 
+    def get_user_detail(self, user_id):
+        """获取用户详细信息：基本信息+API Keys+统计"""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT id, username, email, is_admin, created_at FROM users WHERE id=%s", (user_id,))
+                u = cur.fetchone()
+                if not u:
+                    return None
+                result = {
+                    "id": u[0], "username": u[1], "email": u[2] or "",
+                    "is_admin": u[3],
+                    "created_at": u[4].isoformat() if u[4] else None,
+                    "api_keys": [], "stats": {},
+                }
+                cur.execute("SELECT id, api_key, note, is_active, created_at, last_used_at FROM api_keys WHERE user_id=%s ORDER BY id", (user_id,))
+                for r in cur.fetchall():
+                    result["api_keys"].append({
+                        "id": r[0], "api_key": r[1], "note": r[2],
+                        "is_active": r[3],
+                        "created_at": r[4].isoformat() if r[4] else None,
+                        "last_used_at": r[5].isoformat() if r[5] else None,
+                    })
+                result["stats"] = self.get_user_stats(user_id)
+                return result
+        except Exception as e:
+            print(f"获取用户详情失败: {e}")
+            return None
+
     def __del__(self):
         if hasattr(self, 'conn'):
             self.conn.close()
+
+    # ============ 用户 Prompt/Skill 管理 ============
+
+    def list_prompts(self, user_id, ptype='prompt'):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, title, content, is_active, created_at, updated_at FROM user_prompts WHERE user_id=%s AND type=%s ORDER BY updated_at DESC",
+                    (user_id, ptype)
+                )
+                rows = cur.fetchall()
+                return [{"id": r[0], "title": r[1], "content": r[2], "is_active": r[3],
+                         "created_at": r[4].isoformat() if r[4] else None,
+                         "updated_at": r[5].isoformat() if r[5] else None} for r in rows]
+        except Exception as e:
+            print(f"获取prompt列表失败: {e}")
+            return []
+
+    def create_prompt(self, user_id, ptype, title, content):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO user_prompts (user_id, type, title, content) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (user_id, ptype, title, content)
+                )
+                return cur.fetchone()[0]
+        except Exception as e:
+            print(f"创建prompt失败: {e}")
+            return None
+
+    def update_prompt(self, user_id, prompt_id, title=None, content=None):
+        try:
+            with self.conn.cursor() as cur:
+                sets = []
+                vals = []
+                if title is not None:
+                    sets.append("title = %s")
+                    vals.append(title)
+                if content is not None:
+                    sets.append("content = %s")
+                    vals.append(content)
+                sets.append("updated_at = CURRENT_TIMESTAMP")
+                vals.extend([user_id, prompt_id])
+                cur.execute(
+                    f"UPDATE user_prompts SET {', '.join(sets)} WHERE user_id=%s AND id=%s",
+                    vals
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"更新prompt失败: {e}")
+            return False
+
+    def delete_prompt(self, user_id, prompt_id):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("DELETE FROM user_prompts WHERE user_id=%s AND id=%s", (user_id, prompt_id))
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"删除prompt失败: {e}")
+            return False
+
+    def set_active_prompt(self, user_id, prompt_id, ptype):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE user_prompts SET is_active=FALSE WHERE user_id=%s AND type=%s", (user_id, ptype))
+                if prompt_id and prompt_id > 0:
+                    cur.execute("UPDATE user_prompts SET is_active=TRUE WHERE user_id=%s AND id=%s", (user_id, prompt_id))
+                return True
+        except Exception as e:
+            print(f"设置活跃prompt失败: {e}")
+            return False
+
+    def get_active_prompt(self, user_id, ptype):
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, title, content FROM user_prompts WHERE user_id=%s AND type=%s AND is_active=TRUE",
+                    (user_id, ptype)
+                )
+                r = cur.fetchone()
+                if r:
+                    return {"id": r[0], "title": r[1], "content": r[2]}
+                return None
+        except Exception as e:
+            print(f"获取活跃prompt失败: {e}")
+            return None
