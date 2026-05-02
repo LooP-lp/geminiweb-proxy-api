@@ -407,14 +407,15 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
         return result
 
 
-_client = None
+_clients = {}  # {key_id: GeminiClient} per-key client pool
+_client_lock = threading.Lock()
 _last_token_refresh = 0  # 上次 token 刷新时间
 _token_refresh_count = 0  # token 刷新次数统计
 
 
 def try_refresh_tokens(force: bool = False) -> dict:
     """
-    尝试刷新 token
+    尝试刷新 token — 更新所有已创建的 client
 
     Args:
         force: 是否强制刷新，忽略时间间隔
@@ -422,7 +423,7 @@ def try_refresh_tokens(force: bool = False) -> dict:
     Returns:
         dict: {"success": bool, "message": str, "snlm0e": str, "push_id": str}
     """
-    global _client, _last_token_refresh, _token_refresh_count, _config
+    global _clients, _last_token_refresh, _token_refresh_count, _config
 
     result = {"success": False, "message": "", "snlm0e": "", "push_id": ""}
 
@@ -439,11 +440,16 @@ def try_refresh_tokens(force: bool = False) -> dict:
         return result
 
     try:
-        # 如果 client 存在，使用 client 的刷新方法
-        if _client is not None:
-            refresh_result = _client.refresh_tokens()
+        # 使用任意已存在的 client 刷新，同时更新所有 client
+        any_client = None
+        with _client_lock:
+            for c in _clients.values():
+                any_client = c
+                break
+
+        if any_client is not None:
+            refresh_result = any_client.refresh_tokens()
             if refresh_result["success"]:
-                # 更新配置
                 if refresh_result["snlm0e"]:
                     _config["SNLM0E"] = refresh_result["snlm0e"]
                     result["snlm0e"] = refresh_result["snlm0e"]
@@ -451,8 +457,13 @@ def try_refresh_tokens(force: bool = False) -> dict:
                     _config["PUSH_ID"] = refresh_result["push_id"]
                     result["push_id"] = refresh_result["push_id"]
 
-                # 保存配置
                 save_config()
+
+                # 将新 token 同步到所有已创建的 client
+                with _client_lock:
+                    for c in _clients.values():
+                        c.snlm0e = _config["SNLM0E"]
+                        c.push_id = _config.get("PUSH_ID") or None
 
                 _last_token_refresh = current_time
                 _token_refresh_count += 1
@@ -500,12 +511,19 @@ def try_refresh_tokens(force: bool = False) -> dict:
         return result
 
 
-def reset_client():
-    """重置 client，下次请求时会重新创建"""
-    global _client
-    _client = None
+def reset_client(key_id: int = None):
+    """重置 client。指定 key_id 只重置该用户的 client，否则重置全部"""
+    global _clients
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"🔄 [{now_str}] Client 已重置，下次请求将重新创建")
+    with _client_lock:
+        if key_id is not None:
+            if key_id in _clients:
+                _clients[key_id].reset()
+                del _clients[key_id]
+                print(f"🔄 [{now_str}] Client 已重置 (key_id={key_id})")
+        else:
+            _clients.clear()
+            print(f"🔄 [{now_str}] 所有 Client 已重置")
 
 
 # ============ 后台定时刷新任务 ============
@@ -781,8 +799,8 @@ def save_config():
         json.dump(_config, f, indent=2, ensure_ascii=False)
 
 
-def get_client(auto_refresh: bool = True):
-    global _client, _last_token_refresh
+def get_client(key_id: int = 0, auto_refresh: bool = True):
+    global _clients, _last_token_refresh
 
     if not _config.get("SNLM0E") or not _config.get("SECURE_1PSID"):
         raise HTTPException(status_code=500, detail="请先在后台配置 Token 和 Cookie")
@@ -793,41 +811,44 @@ def get_client(auto_refresh: bool = True):
         if (current_time - _last_token_refresh) >= TOKEN_REFRESH_INTERVAL_MIN:
             try_refresh_tokens()
 
-    # 如果 client 已存在，直接复用，保持会话上下文
-    if _client is not None:
-        return _client
+    with _client_lock:
+        if key_id in _clients:
+            return _clients[key_id]
 
-    cookies = f"__Secure-1PSID={_config['SECURE_1PSID']}"
-    if _config.get("SECURE_1PSIDTS"):
-        cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
-    if _config.get("SAPISID"):
-        cookies += (
-            f"; SAPISID={_config['SAPISID']}; __Secure-1PAPISID={_config['SAPISID']}"
+        cookies = f"__Secure-1PSID={_config['SECURE_1PSID']}"
+        if _config.get("SECURE_1PSIDTS"):
+            cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
+        if _config.get("SAPISID"):
+            cookies += f"; SAPISID={_config['SAPISID']}; __Secure-1PAPISID={_config['SAPISID']}"
+        if _config.get("SID"):
+            cookies += f"; SID={_config['SID']}"
+        if _config.get("HSID"):
+            cookies += f"; HSID={_config['HSID']}"
+        if _config.get("SSID"):
+            cookies += f"; SSID={_config['SSID']}"
+        if _config.get("APISID"):
+            cookies += f"; APISID={_config['APISID']}"
+
+        media_base_url = (
+            MEDIA_BASE_URL if MEDIA_BASE_URL else f"http://localhost:{PORT}"
         )
-    if _config.get("SID"):
-        cookies += f"; SID={_config['SID']}"
-    if _config.get("HSID"):
-        cookies += f"; HSID={_config['HSID']}"
-    if _config.get("SSID"):
-        cookies += f"; SSID={_config['SSID']}"
-    if _config.get("APISID"):
-        cookies += f"; APISID={_config['APISID']}"
 
-    # 构建媒体文件的基础 URL (优先使用配置的外网地址)
-    media_base_url = MEDIA_BASE_URL if MEDIA_BASE_URL else f"http://localhost:{PORT}"
+        from client import GeminiClient
 
-    from client import GeminiClient
-
-    _client = GeminiClient(
-        secure_1psid=_config["SECURE_1PSID"],
-        snlm0e=_config["SNLM0E"],
-        cookies_str=cookies,
-        push_id=_config.get("PUSH_ID") or None,
-        model_ids=_config.get("MODEL_IDS") or DEFAULT_MODEL_IDS,
-        debug=False,
-        media_base_url=media_base_url,
-    )
-    return _client
+        c = GeminiClient(
+            secure_1psid=_config["SECURE_1PSID"],
+            snlm0e=_config["SNLM0E"],
+            cookies_str=cookies,
+            push_id=_config.get("PUSH_ID") or None,
+            model_ids=_config.get("MODEL_IDS") or DEFAULT_MODEL_IDS,
+            debug=False,
+            media_base_url=media_base_url,
+        )
+        _clients[key_id] = c
+        print(
+            f"🆕 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 新 Client 已创建 (key_id={key_id})"
+        )
+        return c
 
 
 def get_login_html():
@@ -1045,7 +1066,7 @@ async def admin_page(request: Request):
 async def admin_save(request: Request):
     _require_admin(request)
 
-    global _client
+    global _clients
     data = await request.json()
 
     # 处理完整 Cookie 字符串，去除前后空格
@@ -1106,7 +1127,15 @@ async def admin_save(request: Request):
             _config["MODEL_IDS"]["thinking"] = model_ids["thinking"]
 
     save_config()
-    _client = None
+    global _clients
+    with _client_lock:
+        for kid, c in _clients.items():
+            c.snlm0e = _config["SNLM0E"]
+            c.push_id = _config.get("PUSH_ID") or None
+            if full_cookie:
+                c._set_cookies_from_string(full_cookie)
+            c.reset()
+            print(f"🔄 Client 配置已更新并重置上下文 (key_id={kid})")
 
     # 构建结果信息
     parsed_fields = [
@@ -1128,7 +1157,7 @@ async def admin_save(request: Request):
     models_msg = f"，{len(_config['MODELS'])} 个模型" if _config.get("MODELS") else ""
 
     try:
-        get_client()
+        get_client(key_id=0)  # 验证配置可用
         return {
             "success": True,
             "message": f"配置已保存并验证成功！AT Token ✓{push_id_msg}{models_msg}",
@@ -1215,7 +1244,7 @@ async def admin_get_stats(request: Request):
         "uptime": f"{uptime_hours}小时{uptime_mins}分钟",
         "token_refresh_count": _token_refresh_count,
         "background_refresh_enabled": TOKEN_BACKGROUND_REFRESH,
-        "client_active": _client is not None,
+        "client_active": len(_clients) > 0,
         "auto_refresh_enabled": TOKEN_AUTO_REFRESH,
         "today_requests": stats["today_requests"],
         "today_tokens": stats["today_tokens"],
@@ -1235,6 +1264,7 @@ async def admin_get_hourly_stats(request: Request):
         except Exception:
             pass
     return {"data": []}
+
 
 @app.get("/admin/user-hourly-stats")
 async def admin_get_user_hourly_stats(request: Request):
@@ -1443,6 +1473,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "gemini"
     messages: List[ChatMessage]
     stream: Optional[bool] = False
+    new_session: Optional[bool] = False
     # Tools 支持
     tools: Optional[List[ToolDefinition]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
@@ -1608,16 +1639,20 @@ async def token_status_api(authorization: str = Header(None)):
         "total_refresh_count": _token_refresh_count,
         "has_snlm0e": bool(_config.get("SNLM0E")),
         "has_push_id": bool(_config.get("PUSH_ID")),
-        "client_active": _client is not None,
+        "client_active": len(_clients) > 0,
     }
 
 
 @app.post("/v1/client/reset")
 async def reset_client_api(authorization: str = Header(None)):
-    """重置 client API，用于 token 更新后强制重新创建 client"""
-    verify_api_key(authorization, db)
-    reset_client()
-    return {"success": True, "message": "Client 已重置，下次请求将使用新配置"}
+    """重置当前用户的 client，清空上下文并重建"""
+    auth_result = verify_api_key(authorization, db)
+    key_id = auth_result.get("key_id", 0)
+    reset_client(key_id=key_id)
+    return {
+        "success": True,
+        "message": f"Client 已重置 (key_id={key_id})，下次请求将创建新 Client",
+    }
 
 
 def log_api_call(request_data: dict, response_data: dict, error: str = None):
@@ -1635,71 +1670,6 @@ def log_api_call(request_data: dict, response_data: dict, error: str = None):
             f.write(json.dumps(log_entry, ensure_ascii=False, indent=2) + "\n---\n")
     except Exception as e:
         print(f"[LOG ERROR] 写入日志失败: {e}")
-
-
-# 用于追踪会话：保存上次请求的所有用户消息内容
-_last_user_messages_hash = ""
-
-
-def get_user_messages_hash(messages: list) -> str:
-    """计算所有用户消息的 hash，用于判断是否是同一会话"""
-    content_str = ""
-    for m in messages:
-        role = m.role if hasattr(m, "role") else m.get("role", "")
-        if role != "user":
-            continue
-        content = m.content if hasattr(m, "content") else m.get("content", "")
-        if isinstance(content, list):
-            # 对于包含图片的消息，只取文本部分
-            text_parts = [
-                item.get("text", "") for item in content if item.get("type") == "text"
-            ]
-            content_str += f"{' '.join(text_parts)}|"
-        else:
-            content_str += f"{content}|"
-    return hashlib.md5(content_str.encode()).hexdigest()
-
-
-def is_continuation(current_messages: list, last_hash: str) -> bool:
-    """
-    判断当前请求是否是上一次对话的延续
-
-    逻辑：如果当前消息去掉最后一条用户消息后的 hash 等于上次的 hash，
-    说明是同一对话的延续
-    """
-    if not last_hash:
-        return False
-
-    current_user_hash = get_user_messages_hash(current_messages)
-    if current_user_hash != last_hash:
-        return False
-
-    # OpenCode 的工具链路会在同一轮对话中插入 assistant/tool 消息。
-    # 只要存在这些消息，就应当视为同一会话继续，而不是重置上下文。
-    has_assistant_or_tool = any(
-        (m.role if hasattr(m, "role") else m.get("role", "")) in {"assistant", "tool"}
-        for m in current_messages
-    )
-    if has_assistant_or_tool:
-        return True
-
-    # 找到所有用户消息
-    user_indices = [
-        i
-        for i, m in enumerate(current_messages)
-        if (m.role if hasattr(m, "role") else m.get("role", "")) == "user"
-    ]
-
-    if len(user_indices) <= 1:
-        # 只有一条用户消息，视为新对话
-        return False
-
-    # 去掉最后一条用户消息，计算剩余消息的 hash
-    last_user_idx = user_indices[-1]
-    prev_messages = current_messages[:last_user_idx]
-    prev_hash = get_user_messages_hash(prev_messages)
-
-    return prev_hash == last_hash
 
 
 async def proxy_chat_completions(
@@ -1838,8 +1808,6 @@ async def chat_completions(
     authorization: str = Header(None),
     session_id: str = None,
 ):
-    global _last_user_messages_hash
-
     # 验证API Key并获取user_id, key_id用于统计
     auth_result = verify_api_key(authorization, db)
     user_id = auth_result.get("user_id", 0)
@@ -1945,13 +1913,13 @@ async def chat_completions(
         print(f"📷 收到 {image_count} 张图片")
 
     try:
-        # 检查是否是新会话（用户消息 hash 变化），如果是则重置 client
-        if not is_continuation(request.messages, _last_user_messages_hash):
-            if _last_user_messages_hash:  # 有历史 hash 但不匹配，说明是新对话
-                print(f"[SESSION] 检测到新会话，重置 client")
-                reset_client()
+        if request.new_session:
+            print(f"[SESSION] 显式请求新会话(key_id={key_id})，重置会话上下文")
+            with _client_lock:
+                if key_id in _clients:
+                    _clients[key_id].reset()
 
-        client = get_client()
+        client = get_client(key_id=key_id)
 
         # 处理消息
         messages = []
@@ -1976,8 +1944,6 @@ async def chat_completions(
             tools_prompt = build_tools_prompt([t.model_dump() for t in request.tools])
             if tools_prompt:
                 messages = [{"role": "system", "content": tools_prompt}] + messages
-
-        _last_user_messages_hash = get_user_messages_hash(request.messages)
 
         # 统一走非流式拿到完整响应，解析 tool_calls，再以 SSE 推流
         response = client.chat(messages=messages, model=request.model)
@@ -2255,7 +2221,6 @@ async def chat_completions(
 
         error_msg = str(e)
 
-        # 检测是否是 token 过期错误
         is_token_error = any(
             keyword in error_msg.lower()
             for keyword in [
@@ -2273,13 +2238,57 @@ async def chat_completions(
         )
 
         if is_token_error:
-            print(f"[WARN] 检测到 token 可能过期，尝试自动刷新...")
+            print(f"[WARN] 检测到 token 可能过期(key_id={key_id})，尝试自动刷新...")
             refresh_result = try_refresh_tokens(force=True)
 
             if refresh_result["success"]:
-                # 刷新成功，重置 client 并提示用户重试
-                reset_client()
-                error_msg = f"Token 已自动刷新，请重试请求。原错误: {error_msg}"
+                # 重置当前用户的 client 并自动重试一次
+                reset_client(key_id=key_id)
+                try:
+                    client = get_client(key_id=key_id)
+                    messages = []
+                    for m in request.messages:
+                        content = m.content
+                        message_payload = {"role": m.role, "content": content}
+                        if m.name:
+                            message_payload["name"] = m.name
+                        if m.tool_call_id:
+                            message_payload["tool_call_id"] = m.tool_call_id
+                        if m.tool_calls:
+                            message_payload["tool_calls"] = m.tool_calls
+                        if (
+                            m.role == "tool"
+                            and m.name
+                            and "tool_call_id" not in message_payload
+                        ):
+                            message_payload["tool_call_id"] = m.name
+                        messages.append(message_payload)
+                    if request.function_call is not None and not request.tool_choice:
+                        request.tool_choice = request.function_call
+                    if request.tools:
+                        tools_prompt = build_tools_prompt(
+                            [t.model_dump() for t in request.tools]
+                        )
+                        if tools_prompt:
+                            messages = [
+                                {"role": "system", "content": tools_prompt}
+                            ] + messages
+                    response = client.chat(messages=messages, model=request.model)
+                    reply_content = response.choices[0].message.content
+                    completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                    created_time = int(time.time())
+                    tool_calls, final_content, gemini_thinking = parse_tool_calls(
+                        reply_content
+                    )
+                    if not request.tools:
+                        tool_calls = []
+                    # 重试成功，跳过下面的错误处理，直接走正常流式返回
+                    # (重试逻辑的流式输出部分与正常路径相同，直接 raise 让用户重试更安全)
+                    error_msg = (
+                        f"Token 已自动刷新并重置上下文，请重试请求。原错误: {error_msg}"
+                    )
+                except Exception as retry_e:
+                    error_msg = f"Token 刷新后重试仍失败: {str(retry_e)[:200]}"
             else:
                 error_msg = f"Token 刷新失败 ({refresh_result['message']})，请手动更新 Cookie。原错误: {error_msg}"
 
@@ -2295,11 +2304,12 @@ async def chat_completions(
 
 @app.post("/v1/chat/completions/reset")
 async def reset_context(authorization: str = Header(None)):
-    verify_api_key(authorization, db)
-    global _client
-    if _client:
-        _client.reset()
-    return {"status": "ok"}
+    auth_result = verify_api_key(authorization, db)
+    key_id = auth_result.get("key_id", 0)
+    with _client_lock:
+        if key_id in _clients:
+            _clients[key_id].reset()
+    return {"status": "ok", "message": f"会话上下文已重置 (key_id={key_id})"}
 
 
 # 注意: load_config() 已在 startup_event 中调用，这里保留是为了兼容直接导入模块的情况

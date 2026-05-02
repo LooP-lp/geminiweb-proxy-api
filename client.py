@@ -225,18 +225,31 @@ class GeminiClient:
     def refresh_tokens(self) -> dict:
         """
         刷新 token (SNlM0e 和 push_id)
-        
+        使用独立 httpx session 避免与 chat 请求的 session 冲突
+
         Returns:
             dict: {"success": bool, "snlm0e": str, "push_id": str, "error": str}
         """
         result = {"success": False, "snlm0e": "", "push_id": "", "error": ""}
-        
+
         try:
             if self.debug:
                 print("[DEBUG] 开始刷新 token...")
-            
-            # 访问 Gemini 首页刷新 session
-            resp = self.session.get(self.BASE_URL)
+
+            refresh_session = httpx.Client(
+                timeout=30.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            for cookie in self.session.cookies.jar:
+                refresh_session.cookies.set(cookie.name, cookie.value, domain=cookie.domain)
+            try:
+                resp = refresh_session.get(self.BASE_URL)
+            finally:
+                refresh_session.close()
             
             if resp.status_code != 200:
                 result["error"] = f"访问 Gemini 失败: HTTP {resp.status_code}"

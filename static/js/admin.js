@@ -140,11 +140,21 @@ function renderMd(text) {
     }
 
     // ===== Chat =====
-    var chatHistory = [];
-    var attachedImages = []; // [{base64, mime, name}]
-    var isSending = false;
+var chatHistory = [];
+var attachedImages = []; // [{base64, mime, name}]
+var isSending = false;
 
-    // Load models into selector
+function newChat() {
+    if (isSending) return;
+    chatHistory = [];
+    document.getElementById('chatMessages').innerHTML = '';
+    fetch('/v1/chat/completions/reset', {
+        method: 'POST',
+        headers: {'Authorization': 'Bearer ' + getApiKey()}
+    }).catch(function(err) { console.error(err); });
+}
+
+// Load models into selector
 async function loadModels() {
         try {
         var resp = await fetch('/v1/models', {headers:{'Authorization':'Bearer '+getApiKey()}});
