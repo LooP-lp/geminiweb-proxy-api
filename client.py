@@ -131,7 +131,7 @@ class GeminiClient:
             bl: BL 版本号 (可选，自动获取)
             cookies_str: 完整 cookie 字符串 (可选，替代单独设置)
             push_id: Push ID for image upload (必填用于图片上传)
-            model_ids: 模型 ID 映射 {"flash": "xxx", "pro": "xxx", "thinking": "xxx"}
+            model_ids: 模型 ID 映射 {"flash": "xxx", "pro": "xxx", "lite": "xxx"}
             debug: 是否打印调试信息
             media_base_url: 媒体文件的基础 URL (如 http://localhost:8000)，用于构建完整的媒体访问 URL
         """
@@ -148,7 +148,7 @@ class GeminiClient:
         self.model_ids = model_ids or {
             "flash": "56fdd199312815e2",
             "pro": "e6fa609c3fa255c0",
-            "thinking": "e051ce1aa80aa576",
+            "lite": "8c46e95b1a07cecc",
         }
         
         self.session = httpx.Client(
@@ -181,6 +181,8 @@ class GeminiClient:
         
         # 消息历史
         self.messages: List[Message] = []
+        self.last_stream_thinking: str = ""
+        self.last_stream_generated_media: List[str] = []
         
         # 验证必填参数
         if not self.snlm0e:
@@ -618,16 +620,16 @@ class GeminiClient:
         timestamp = int(time.time() * 1000)
         
         # 模型映射: 将模型名称转换为 Gemini 内部模型标识
-        # [[0]] = gemini-3.0-pro (Pro 版)
-        # [[1]] = gemini-3.0-flash (快速版，默认)
-        # [[3]] = gemini-3.0-flash-thinking (思考版)
+        # [[0]] = gemini-3.1-pro (Pro 版)
+        # [[1]] = gemini-3.5-flash (快速版，默认)
+        # [[3]] = gemini-3.1-lite (Lite 版)
         model_code = [[1]]  # 默认快速版
         if model:
             model_lower = model.lower()
             if "pro" in model_lower:
                 model_code = [[0]]  # Pro 版
-            elif "thinking" in model_lower or "think" in model_lower:
-                model_code = [[3]]  # 思考版
+            elif "lite" in model_lower:
+                model_code = [[3]]  # Lite 版
             # flash 或其他情况保持默认 [[1]]
         
         # 构建内部 JSON 数组 (基于真实请求格式)
@@ -720,6 +722,7 @@ class GeminiClient:
             final_text = ""
             generated_images_set = set()  # 使用 set 全局去重
             last_inner_json = None  # 保存最后一个有效的 inner_json 用于调试
+            debug_candidate_snapshot = None
             
             for line in lines:
                 line = line.strip()
@@ -753,6 +756,20 @@ class GeminiClient:
                                 candidates = inner_json[4]
                                 if candidates and len(candidates) > 0:
                                     candidate = candidates[0]
+                                    if self.debug and debug_candidate_snapshot is None:
+                                        try:
+                                            debug_candidate_snapshot = {
+                                                "inner_type": type(inner_json).__name__,
+                                                "inner_len": len(inner_json) if isinstance(inner_json, list) else None,
+                                                "inner_preview": str(inner_json)[:2000],
+                                                "candidate_type": type(candidate).__name__,
+                                                "candidate_len": len(candidate) if isinstance(candidate, list) else None,
+                                                "candidate_preview": str(candidate)[:2000],
+                                            }
+                                        except Exception:
+                                            debug_candidate_snapshot = {
+                                                "inner_preview": str(inner_json)[:2000]
+                                            }
                                     if candidate and len(candidate) > 1 and candidate[1]:
                                         # candidate[1] 是一个数组，第一个元素是文本
                                         text = candidate[1][0] if isinstance(candidate[1], list) else candidate[1]
@@ -831,14 +848,9 @@ class GeminiClient:
                     # 没有文本，只有图片
                     final_text = media_text
                 
-                if self.debug:
-                    print(f"[DEBUG] 媒体处理完成，成功下载 {len([u for u in local_media_urls if u.startswith('/media/')])} 个")
-            
-            # 检测视频生成占位符，替换为提示文案
-            is_video_generation = False
-            if final_text and 'video_gen_chip' in final_text:
-                is_video_generation = True
-            
+            if self.debug:
+                print(f"[DEBUG] 媒体处理完成，成功下载 {len([u for u in local_media_urls if u.startswith('/media/')])} 个")
+
             # 清理文本中的占位符 URL 和用户上传图片的 URL
             if final_text:
                 # 清理占位符 URL
@@ -848,24 +860,18 @@ class GeminiClient:
                 final_text = re.sub(r'!\[[^\]]*\]\(https://[^)]*googleusercontent\.com/gg/[^)]+\)', '', final_text)
                 final_text = re.sub(r'https://lh3\.googleusercontent\.com/gg/[^\s\)]+', '', final_text)
                 final_text = final_text.strip()
-            
-            # 如果是视频生成，添加提示文案
-            if is_video_generation:
-                video_notice = "\n\n---\n📹 视频为异步生成，生成结果可在官网聊天窗口查看下载。\n\n⏱️ 使用限制：\n- 视频生成 (Veo 模型)：每天总共可以生成 3 次\n- 图片生成 (Nano Banana 模型)：每天总共可以生成 1000 次"
-                if final_text:
-                    final_text = final_text + video_notice
-                else:
-                    final_text = video_notice.strip()
-            
+
             if final_text:
                 # 优化图片 URL 为原始高清尺寸（仅对未下载的原始 URL）
+                if self.debug and debug_candidate_snapshot:
+                    print(f"[DEBUG] Gemini thinking snapshot: {json.dumps(debug_candidate_snapshot, ensure_ascii=False)[:3000]}")
                 final_text = self._optimize_image_urls(final_text)
                 return final_text
-            
+
             # 如果没有文本也没有图片，尝试从 last_inner_json 中提取更多信息
             if self.debug and last_inner_json:
                 print(f"[DEBUG] 无法提取内容，inner_json 结构: {str(last_inner_json)[:500]}...")
-                
+
         except Exception as e:
             if self.debug:
                 print(f"[DEBUG] 解析错误: {e}")
@@ -1130,6 +1136,123 @@ class GeminiClient:
             pass
         
         return "无法提取回复内容"
+
+    def _extract_stream_text_and_thought(self, inner: Any) -> tuple[str, str]:
+        """从 Gemini 流式 inner_json 中尽力提取正文和 thinking。
+
+        这是 best-effort 解析：
+        - 优先扫描类似 content.parts 的结构
+        - 如果 part 显式带 thought 标记，则归入 thinking
+        - 否则归入正文
+        - 兜底保留旧版 candidate[1][0] 文本提取
+        """
+        answer_parts: List[str] = []
+        thought_parts: List[str] = []
+        nested_texts: List[str] = []
+
+        def looks_like_thought_summary(text: str) -> bool:
+            text = (text or "").strip()
+            if not text:
+                return False
+            if text.startswith("**") and "**" in text[2:]:
+                return True
+            thought_markers = [
+                "Analyzing ",
+                "Planning ",
+                "Reasoning ",
+                "Thinking ",
+                "I’m analyzing",
+                "I'm analyzing",
+                "I've been",
+                "Let me think",
+                "先分析",
+                "正在分析",
+                "让我想想",
+            ]
+            return any(marker in text for marker in thought_markers)
+
+        def visit(obj: Any, parent_key: str = ""):
+            if isinstance(obj, dict):
+                text = obj.get("text")
+                thought_flag = obj.get("thought") is True
+                if isinstance(text, str) and text:
+                    if thought_flag:
+                        thought_parts.append(text)
+                    else:
+                        answer_parts.append(text)
+                for key, value in obj.items():
+                    visit(value, key)
+                return
+
+            if isinstance(obj, list):
+                # 处理 Gemini Web 常见的 candidate[1] = [text, ...] 结构
+                if parent_key == "candidate_content_parts":
+                    for item in obj:
+                        if isinstance(item, str) and item:
+                            answer_parts.append(item)
+                        elif isinstance(item, dict):
+                            visit(item, parent_key)
+                    return
+
+                for item in obj:
+                    if isinstance(item, str):
+                        stripped = item.strip()
+                        if len(stripped) >= 30:
+                            nested_texts.append(stripped)
+                    else:
+                        visit(item, parent_key)
+                return
+
+        try:
+            if inner and len(inner) > 4 and inner[4]:
+                candidates = inner[4]
+                if candidates and len(candidates) > 0:
+                    candidate = candidates[0]
+                    if candidate and len(candidate) > 1:
+                        self.choice_id = candidate[0] or self.choice_id
+                        content_parts = candidate[1]
+                        if isinstance(content_parts, list):
+                            visit(content_parts, "candidate_content_parts")
+                        elif isinstance(content_parts, str) and content_parts:
+                            answer_parts.append(content_parts)
+
+                    # 扫描整个 candidate / inner，尽可能找到 thought 结构
+                    visit(candidate, "candidate")
+            visit(inner, "inner")
+        except Exception:
+            pass
+
+        # 去重保序
+        def dedupe_keep_order(items: List[str]) -> List[str]:
+            seen = set()
+            result = []
+            for item in items:
+                if item not in seen:
+                    seen.add(item)
+                    result.append(item)
+            return result
+
+        nested_texts = dedupe_keep_order(nested_texts)
+
+        if nested_texts and not thought_parts:
+            thought_candidates = [t for t in nested_texts if looks_like_thought_summary(t)]
+            if thought_candidates:
+                thought_parts.extend(thought_candidates)
+
+        answer = "".join(dedupe_keep_order(answer_parts)).strip()
+        thought = "\n\n".join(dedupe_keep_order(thought_parts)).strip()
+
+        # 兜底：如果仍然没有正文，则退回旧逻辑
+        if not answer:
+            try:
+                if inner and len(inner) > 4 and inner[4]:
+                    cand = inner[4][0]
+                    if cand and len(cand) > 1 and cand[1]:
+                        answer = cand[1][0] if isinstance(cand[1], list) else cand[1]
+            except Exception:
+                pass
+
+        return answer or "", thought or ""
     
     def chat(
         self,
@@ -1149,7 +1272,7 @@ class GeminiClient:
             image: 图片二进制数据
             image_url: 图片 URL
             reset_context: 是否重置上下文
-            model: 模型名称 (gemini-3.0-flash/gemini-3.0-flash-thinking/gemini-3.0-pro)
+            model: 模型名称 (gemini-3.5-flash/gemini-3.1-lite/gemini-3.1-pro)
         
         Returns:
             ChatCompletionResponse: OpenAI 格式响应
@@ -1181,26 +1304,30 @@ class GeminiClient:
                     tool_call_id = last_msg.get("tool_call_id", "")
                     tool_name = last_msg.get("name", "")
                     content_text = str(content) if content is not None else ""
-                    tool_header = "[工具结果]"
-                    if tool_name:
-                        tool_header += f" {tool_name}"
                     if content_text:
-                        text_parts.append(f"{tool_header}: {content_text}")
-                    else:
-                        text_parts.append(tool_header)
+                        if tool_call_id or tool_name:
+                            label = "Tool result"
+                            if tool_name:
+                                label += f" ({tool_name})"
+                            if tool_call_id:
+                                label += f" [{tool_call_id}]"
+                            text_parts.append(f"{label}:\n{content_text}")
+                        else:
+                            text_parts.append(content_text)
                 elif role == "assistant":
-                    # 检查是否有 tool_calls
                     tool_calls = last_msg.get("tool_calls") or []
                     if tool_calls:
-                        tc_lines = []
                         for tc in tool_calls:
                             fn = (tc or {}).get("function", {})
+                            tc_id = (tc or {}).get("id", "")
                             name = fn.get("name", "")
                             args = fn.get("arguments", "")
-                            tc_lines.append(f"- {name}({args})")
-                        if tc_lines:
-                            text_parts.append("[工具调用]:\n" + "\n".join(tc_lines))
-                        text_parts.append(tool_header)
+                            header = "Assistant requested tool call"
+                            if tc_id:
+                                header += f" [{tc_id}]"
+                            text_parts.append(f"{header}: {name}({args})")
+                    elif isinstance(content, str) and content:
+                        text_parts.append(content)
                 
                 if self.debug:
                     print(f"[DEBUG] 增量模式: 仅发送最新消息 (无历史)")
@@ -1210,37 +1337,38 @@ class GeminiClient:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
                     
-                    if role == "user":
-                        t, imgs = self._parse_content(content)
-                        if t:
-                            text_parts.append(t)
-                        if imgs:
-                            images.extend(imgs)
-                    elif role == "assistant":
-                        if isinstance(content, str) and content:
-                            text_parts.append(f"[助手回复]: {content}")
-                        elif isinstance(content, list) and content:
-                            content_text, _ = self._parse_content(content)
-                            if content_text:
-                                text_parts.append(f"[助手回复]: {content_text}")
-                    elif role == "system":
-                        if isinstance(content, str) and content:
-                            text_parts.insert(0, content)
-                    elif role == "tool":
-                        tool_call_id = msg.get("tool_call_id", "")
-                        tool_name = msg.get("name", "")
-                        content_text = str(content) if content is not None else ""
-                        tool_header = "[工具结果]"
-                        if tool_name:
-                            tool_header += f" {tool_name}"
-                        if tool_call_id:
-                            tool_header += f" ({tool_call_id})"
+                if role == "user":
+                    t, imgs = self._parse_content(content)
+                    if t:
+                        text_parts.append(t)
+                    if imgs:
+                        images.extend(imgs)
+                elif role == "assistant":
+                    if isinstance(content, str) and content:
+                        text_parts.append(content)
+                    elif isinstance(content, list) and content:
+                        content_text, _ = self._parse_content(content)
                         if content_text:
-                            text_parts.append(f"{tool_header}: {content_text}")
+                            text_parts.append(content_text)
+                elif role == "system":
+                    if isinstance(content, str) and content:
+                        text_parts.insert(0, content)
+                elif role == "tool":
+                    tool_call_id = msg.get("tool_call_id", "")
+                    tool_name = msg.get("name", "")
+                    content_text = str(content) if content is not None else ""
+                    if content_text:
+                        if tool_call_id or tool_name:
+                            label = "Tool result"
+                            if tool_name:
+                                label += f" ({tool_name})"
+                            if tool_call_id:
+                                label += f" [{tool_call_id}]"
+                            text_parts.append(f"{label}:\n{content_text}")
                         else:
-                            text_parts.append(tool_header)
+                            text_parts.append(content_text)
 
-                    self.messages.append(Message(role=role, content=content))
+                self.messages.append(Message(role=role, content=content))
             
             text = "\n\n".join(text_parts)
 
@@ -1337,8 +1465,8 @@ class GeminiClient:
             model_lower = model.lower()
             if "pro" in model_lower:
                 model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
-            elif "thinking" in model_lower or "think" in model_lower:
-                model_id = self.model_ids.get("thinking", "e051ce1aa80aa576")
+            elif "lite" in model_lower:
+                model_id = self.model_ids.get("lite", "8c46e95b1a07cecc")
         
         # 上传图片获取路径
         image_paths = []
@@ -1368,9 +1496,7 @@ class GeminiClient:
         }
         
         # 模型选择请求头
-        model_headers = {
-            "x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4], None, None, 2], separators=(',', ':')),
-        }
+        model_headers = { "x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4, 5, 6, 8], None, None, 2, None, None, 1, 2, str(uuid.uuid4()).upper()], separators=(',', ':')) }
         
         # 构建日志记录
         gemini_request_log = {
@@ -1472,12 +1598,16 @@ class GeminiClient:
     def chat_stream(self, text: str = None, images: List[Dict] = None, model: str = None, messages: List[Dict] = None):
         """流式发送请求，返回增量生成器。支持 messages 参数（兼容 OpenAI tools）"""
         url = f"{self.BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-        
+
         params = {"bl": self.bl, "f.sid": "", "hl": "zh-CN", "_reqid": str(self.request_count * 100000 + random.randint(10000, 99999)), "rt": "c"}
-        
+
         model_id = self.model_ids.get("flash", "56fdd199312815e2")
-        if model and "pro" in model.lower():
-            model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
+        if model:
+            model_lower = model.lower()
+            if "pro" in model_lower:
+                model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
+            elif "lite" in model_lower:
+                model_id = self.model_ids.get("lite", "8c46e95b1a07cecc")
         
         image_paths = []
         if images:
@@ -1505,9 +1635,14 @@ class GeminiClient:
         
         req_data = self._build_request_data(text, images, image_paths, model)
         form_data = {"f.req": req_data, "at": self.snlm0e}
-        model_headers = {"x-goog-ext-525001261-jspb": json.dumps([1,None,None,None,model_id,None,None,0,[4],None,None,2], separators=(',', ':'))}
+        model_headers = { "x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4, 5, 6, 8], None, None, 2, None, None, 1, 2, str(uuid.uuid4()).upper()], separators=(',', ':')) }
         
         final_text = ""
+        final_thinking = ""
+        generated_media_set = set()
+        debug_stream_snapshot_printed = False
+        self.last_stream_thinking = ""
+        self.last_stream_generated_media = []
         
         with self.session.stream("POST", url, params=params, data=form_data, headers=model_headers, timeout=60.0) as resp:
             resp.raise_for_status()
@@ -1520,17 +1655,46 @@ class GeminiClient:
                     data = json.loads(line)
                     if isinstance(data, list) and data[0] and len(data[0]) >= 3 and data[0][0] == "wrb.fr" and data[0][2]:
                         inner = json.loads(data[0][2])
-                        if inner and len(inner) > 4 and inner[4]:
-                            cand = inner[4][0]
-                            if cand and len(cand) > 1 and cand[1]:
-                                content = cand[1][0] if isinstance(cand[1], list) else cand[1]
-                                if content and len(content) > len(final_text):
-                                    new_text = content[len(final_text):]
-                                    final_text = content
-                                    if inner[1]:
-                                        self.conversation_id = inner[1][0] or self.conversation_id
-                                    self.choice_id = cand[0] or self.choice_id
-                                    yield new_text
+                        imgs = self._extract_generated_images(inner)
+                        if imgs:
+                            for img in imgs:
+                                generated_media_set.add(img)
+                            self.last_stream_generated_media = list(generated_media_set)
+                        extracted_answer, extracted_thought = self._extract_stream_text_and_thought(inner)
+
+                        has_candidate = bool(inner and len(inner) > 4 and inner[4])
+                        if self.debug and not debug_stream_snapshot_printed and (has_candidate or extracted_answer or extracted_thought):
+                            try:
+                                cand_preview = None
+                                candidate_slots = None
+                                if inner and len(inner) > 4 and inner[4]:
+                                    cand_preview = inner[4][0]
+                                    if isinstance(cand_preview, list):
+                                        candidate_slots = {
+                                            str(i): str(cand_preview[i])[:500]
+                                            for i in range(min(len(cand_preview), 6))
+                                        }
+                                print(f"[DEBUG] Gemini stream thinking snapshot: {json.dumps({'inner_len': len(inner) if isinstance(inner, list) else None, 'has_candidate': has_candidate, 'inner_preview': str(inner)[:2500], 'candidate_preview': str(cand_preview)[:2500], 'candidate_slots': candidate_slots, 'extracted_answer_preview': extracted_answer[:800], 'extracted_thought_preview': extracted_thought[:800]}, ensure_ascii=False)[:5000]}")
+                            except Exception as debug_e:
+                                print(f"[DEBUG] Gemini stream thinking snapshot failed: {debug_e}")
+                            debug_stream_snapshot_printed = True
+
+                        content = extracted_answer
+                        if extracted_thought and len(extracted_thought) > len(final_thinking):
+                            new_thinking = extracted_thought[len(final_thinking):]
+                            final_thinking = extracted_thought
+                            self.last_stream_thinking = final_thinking
+                            if new_thinking:
+                                yield {"type": "reasoning", "text": new_thinking}
+
+                        if content and len(content) > len(final_text):
+                            new_text = content[len(final_text):]
+                            final_text = content
+                            if inner[1]:
+                                self.conversation_id = inner[1][0] or self.conversation_id
+                                if len(inner[1]) > 1:
+                                    self.response_id = inner[1][1] or self.response_id
+                            yield {"type": "content", "text": new_text}
                 except:
                     continue
 

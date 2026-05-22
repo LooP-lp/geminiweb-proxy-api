@@ -19,7 +19,7 @@ from fastapi.responses import (
     JSONResponse,
 )
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, NamedTuple
 import uvicorn
 import time
 import uuid
@@ -30,7 +30,9 @@ import httpx
 import hashlib
 import secrets
 import asyncio
+import base64
 import threading
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,43 +50,36 @@ TOKEN_AUTO_REFRESH = os.getenv("TOKEN_AUTO_REFRESH", "true").lower() == "true"
 TOKEN_BACKGROUND_REFRESH = (
     os.getenv("TOKEN_BACKGROUND_REFRESH", "true").lower() == "true"
 )
-MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", "http://127.0.0.1:7788")
+MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", "")
 
-# 外部代理 API 配置
-EXTERNAL_API_URL = os.getenv("EXTERNAL_API_URL", "")
-EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY", "")
-EXTERNAL_API_URL_2 = os.getenv("EXTERNAL_API_URL_2", "")
-EXTERNAL_API_KEY_2 = os.getenv("EXTERNAL_API_KEY_2", "")
-EXTERNAL_API_URL_3 = os.getenv("EXTERNAL_API_URL_3", "")
-EXTERNAL_API_KEY_3 = os.getenv("EXTERNAL_API_KEY_3", "")
-EXTERNAL_API_KEY_4 = os.getenv("EXTERNAL_API_KEY_4", "")
+# 外部代理 API 配置由 CUSTOM_APIS 动态管理
 
-# 所有可用模型（Gemini 本地 + 外部代理）
-ALL_MODELS = [
-    "gemini-3.0-flash",
-    "gemini-3.0-flash-thinking",
-    "gemini-3.1-pro",
-    "deepseek-v4-pro-search",
-    "英伟达/deepseek-ai/deepseek-v4-pro",
-    "英伟达/minimaxai/minimax-m2.7",
-    "英伟达/z-ai/glm-5.1",
-    "英伟达/moonshotai/kimi-k2.5",
-    "gpt-5-mini",
-    "「hy-Kiro」claude-sonnet-4-5-20250929-thinking",
-    "grok-4.20-0309-non-reasoning",
-    "grok-imagine-image-lite",
-]
+def to_public_model_id(raw_model: str) -> str:
+    for api in _config.get("CUSTOM_APIS", []):
+        group_name = api.get("name", "custom")
+        models = api.get("models", [])
+        if raw_model in models:
+            return f"{group_name}/{raw_model}"
+    return f"gemini/{raw_model}"
 
-# 代理模型集合（请求这些模型时转发到外部 API）
-PROXY_MODELS = {
-    "deepseek-v4-pro-search",
-    "英伟达/z-ai/glm-5.1",
-    "英伟达/minimaxai/minimax-m2.7",
-    "英伟达/moonshotai/kimi-k2.5",
-}
-PROXY_MODELS_2 = {"gpt-5-mini"}
-PROXY_MODELS_3 = {"「hy-Kiro」claude-sonnet-4-5-20250929-thinking"}
-PROXY_MODELS_4 = {"grok-4.20-0309-non-reasoning", "grok-imagine-image-lite"}
+
+def to_upstream_model_id(requested_model: str) -> str:
+    if "/" in requested_model:
+        return requested_model.split("/", 1)[1]
+    return requested_model
+
+
+def model_matches_group(
+    requested_model: str, group_name: str, raw_models: set[str]
+) -> bool:
+    if requested_model in raw_models:
+        return True
+    prefix = f"{group_name}/"
+    return (
+        requested_model.startswith(prefix)
+        and requested_model[len(prefix) :] in raw_models
+    )
+
 
 # ==============================
 
@@ -121,8 +116,56 @@ app.add_middleware(
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+DIST_DIR = os.path.join(os.path.dirname(__file__), "dist")
+
+# Vue SPA dist assets
+if os.path.isdir(os.path.join(DIST_DIR, "assets")):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(DIST_DIR, "assets")),
+        name="spa-assets",
+    )
+
+# Game static files (tetris HTML/JS/CSS) - copied to dist/game/ during build
+GAME_DIST_DIR = os.path.join(DIST_DIR, "game")
+if os.path.isdir(GAME_DIST_DIR):
+    app.mount("/game", StaticFiles(directory=GAME_DIST_DIR, html=True), name="game")
+else:
+    # Fallback: serve from source (dev mode)
+    GAME_SRC_DIR = os.path.join(os.path.dirname(__file__), "frontend", "game")
+    if os.path.isdir(GAME_SRC_DIR):
+        app.mount("/game", StaticFiles(directory=GAME_SRC_DIR, html=True), name="game")
+
+
+# Root-level static files from dist (favicon, icons, etc.)
+@app.get("/yj-logo.ico")
+@app.get("/favicon.ico")
+async def serve_yj_logo_ico():
+    logo_path = os.path.join(DIST_DIR, "yj-logo.ico")
+    if not os.path.isfile(logo_path):
+        logo_path = os.path.join(DIST_DIR, "favicon.ico")
+    if os.path.isfile(logo_path):
+        return FileResponse(logo_path, media_type="image/x-icon")
+    return JSONResponse(
+        status_code=404, content={"detail": "Logo file not found in dist"}
+    )
+
+
+@app.get("/favicon.svg")
+async def serve_favicon_svg():
+    favicon_path = os.path.join(DIST_DIR, "favicon.svg")
+    if os.path.isfile(favicon_path):
+        return FileResponse(favicon_path, media_type="image/svg+xml")
+    return Response(status_code=404)
+
+
+@app.get("/icons.svg")
+async def serve_icons_svg():
+    icons_path = os.path.join(DIST_DIR, "icons.svg")
+    if os.path.isfile(icons_path):
+        return FileResponse(icons_path, media_type="image/svg+xml")
+    return Response(status_code=404)
+
 
 # 生成的媒体文件缓存目录
 MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "media_cache")
@@ -218,8 +261,130 @@ def cleanup_old_media(max_age_hours: int = 1):
         pass
 
 
+# ============ 游戏排行榜 API ============
+
+GAME_SCORES_FILE = os.path.join(os.path.dirname(__file__), "game_scores.json")
+
+
+def _load_game_scores() -> dict:
+    if not os.path.exists(GAME_SCORES_FILE):
+        return {}
+    try:
+        with open(GAME_SCORES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_game_scores(data: dict):
+    with open(GAME_SCORES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@app.post("/api/game/score")
+async def submit_game_score(request: Request):
+    """提交游戏分数"""
+    body = await request.json()
+    score = body.get("score", 0)
+    mode = body.get("mode", "retro")
+    username = body.get("username", "匿名")
+
+    if score <= 0:
+        return JSONResponse(content={"ok": False, "error": "无效分数"}, status_code=400)
+
+    scores = _load_game_scores()
+    if mode not in scores:
+        scores[mode] = []
+
+    from datetime import datetime, timezone
+
+    scores[mode].append(
+        {
+            "username": username,
+            "score": score,
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    # 只保留每个 mode 前 50 条
+    scores[mode].sort(key=lambda x: -x["score"])
+    scores[mode] = scores[mode][:50]
+
+    _save_game_scores(scores)
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/api/game/score")
+async def list_game_scores(mode: str = "retro", limit: int = 10):
+    """获取游戏排行榜"""
+    scores = _load_game_scores()
+    entries = scores.get(mode, [])
+    entries.sort(key=lambda x: -x["score"])
+    return JSONResponse(content=entries[:limit])
+
+
+# ============ 会话隔离架构 ============
+
+
+class ClientKey(NamedTuple):
+    """Client 池的复合键，确保每 user+apikey+session 独立隔离"""
+
+    user_id: int
+    key_id: int
+    session_id: str
+
+
+@dataclass
+class ClientEntry:
+    """Client 池条目：包含 GeminiClient 实例 + 请求序列化锁 + 元数据"""
+
+    client: Any  # GeminiClient
+    lock: Any = field(default_factory=asyncio.Lock)  # per-client 请求序列化锁
+    created_at: float = field(default_factory=time.time)
+    last_used: float = field(default_factory=time.time)
+
+
+def resolve_client_key(
+    auth_result: dict, session_id: Optional[str] = None
+) -> ClientKey:
+    """根据认证结果和 session_id 解析出唯一的 ClientKey
+
+    规则：
+    - 如果提供了 session_id → 使用它（前端每个标签页独立会话）
+    - 如果没有 session_id → 生成稳定的默认值（保证 OpenAI API 客户端也能按 user+key 隔离）
+    """
+    user_id = auth_result.get("user_id", 0)
+    key_id = auth_result.get("key_id", 0)
+    sid = (session_id or "").strip()
+    if not sid:
+        sid = f"default-{user_id}-{key_id}"
+    return ClientKey(user_id, key_id, sid)
+
+
+# Client 池配置
+MAX_CLIENTS = 2000
+CLIENT_IDLE_TTL_S = 6 * 60 * 60  # 6小时空闲自动驱逐
+
 # 存储有效的 session token
 _admin_sessions = set()
+
+# Client 池: {ClientKey: ClientEntry}
+_clients: Dict[ClientKey, ClientEntry] = {}
+_client_lock = threading.Lock()  # 仅保护 dict 操作，不保护 client 调用
+
+
+def _evict_if_needed_locked():
+    """在持有 _client_lock 的情况下调用，驱逐过期或超限的 Client"""
+    now = time.time()
+    # 1) 空闲超时驱逐
+    stale = [k for k, e in _clients.items() if now - e.last_used > CLIENT_IDLE_TTL_S]
+    for k in stale:
+        _clients.pop(k, None)
+    # 2) LRU 容量驱逐
+    if len(_clients) > MAX_CLIENTS:
+        victims = sorted(_clients.items(), key=lambda kv: kv[1].last_used)
+        for k, _ in victims[: len(_clients) - MAX_CLIENTS]:
+            _clients.pop(k, None)
+
 
 # 管理后台统计数据
 _stats = {
@@ -254,13 +419,13 @@ def verify_admin_session(request: Request):
 
 
 # 默认可用模型列表 (Gemini 3 官网三个模型: 快速/思考/Pro)
-DEFAULT_MODELS = ["gemini-3.0-flash", "gemini-3.0-flash-thinking", "gemini-3.1-pro"]
+DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-3.1-lite", "gemini-3.1-pro"]
 
 # 默认模型 ID (用于请求头选择模型)
 DEFAULT_MODEL_IDS = {
     "flash": "fbb127bbb056c959",
     "pro": "9d8ca3786ebdfbea",
-    "thinking": "5bf011840784117a",
+    "lite": "5bf011840784117a",
 }
 
 # 配置存储
@@ -290,6 +455,457 @@ COOKIE_FIELD_MAP = {
     "SSID": "SSID",
     "APISID": "APISID",
 }
+
+_last_token_refresh = 0  # 上次 token 刷新时间
+_token_refresh_count = 0  # token 刷新次数统计
+
+
+def try_refresh_tokens(force: bool = False) -> dict:
+    """
+    尝试刷新 token — 更新所有已创建的 client
+
+    Args:
+        force: 是否强制刷新，忽略时间间隔
+
+    Returns:
+        dict: {"success": bool, "message": str, "snlm0e": str, "push_id": str}
+    """
+    global _clients, _last_token_refresh, _token_refresh_count, _config
+
+    result = {"success": False, "message": "", "snlm0e": "", "push_id": ""}
+
+    if not TOKEN_AUTO_REFRESH and not force:
+        result["message"] = "自动刷新已禁用"
+        return result
+
+    current_time = time.time()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 检查是否需要刷新（除非强制刷新）
+    if not force and (current_time - _last_token_refresh) < TOKEN_REFRESH_INTERVAL_MIN:
+        result["message"] = f"距离上次刷新不足 {TOKEN_REFRESH_INTERVAL_MIN} 秒"
+        return result
+
+    try:
+        # 使用任意已存在的 client 刷新，同时更新所有 client
+        any_client = None
+        with _client_lock:
+            for entry in _clients.values():
+                any_client = entry.client
+                break
+
+        if any_client is not None:
+            refresh_result = any_client.refresh_tokens()
+            if refresh_result["success"]:
+                if refresh_result["snlm0e"]:
+                    _config["SNLM0E"] = refresh_result["snlm0e"]
+                    result["snlm0e"] = refresh_result["snlm0e"]
+                if refresh_result["push_id"]:
+                    _config["PUSH_ID"] = refresh_result["push_id"]
+                    result["push_id"] = refresh_result["push_id"]
+
+                save_config()
+
+                # 将新 token 同步到所有已创建的 client（不清除对话上下文）
+                with _client_lock:
+                    for entry in _clients.values():
+                        entry.client.snlm0e = _config["SNLM0E"]
+                        entry.client.push_id = _config.get("PUSH_ID") or None
+
+                _last_token_refresh = current_time
+                _token_refresh_count += 1
+                result["success"] = True
+                result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
+                print(
+                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
+                )
+            else:
+                result["message"] = refresh_result.get("error", "刷新失败")
+                print(f"⚠️ [{now_str}] Token 刷新失败: {result['message']}")
+        else:
+            # client 不存在，使用 fetch_tokens_from_page
+            cookies = _config.get("FULL_COOKIE", "")
+            if not cookies:
+                cookies = f"__Secure-1PSID={_config.get('SECURE_1PSID', '')}"
+                if _config.get("SECURE_1PSIDTS"):
+                    cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
+
+            tokens = fetch_tokens_from_page(cookies)
+            if tokens.get("snlm0e"):
+                _config["SNLM0E"] = tokens["snlm0e"]
+                result["snlm0e"] = tokens["snlm0e"]
+            if tokens.get("push_id"):
+                _config["PUSH_ID"] = tokens["push_id"]
+                result["push_id"] = tokens["push_id"]
+
+            if tokens.get("snlm0e"):
+                save_config()
+                _last_token_refresh = current_time
+                _token_refresh_count += 1
+                result["success"] = True
+                result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
+                print(
+                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
+                )
+            else:
+                result["message"] = "无法从页面获取新 token"
+
+        return result
+
+    except Exception as e:
+        result["message"] = f"刷新异常: {str(e)}"
+        print(f"❌ [{now_str}] Token 刷新异常: {e}")
+        return result
+
+
+def reset_client(ckey: ClientKey = None, user_id: int = None, key_id: int = None):
+    """重置 client。
+    - 指定 ckey → 只重置该会话
+    - 指定 user_id+key_id（无 ckey）→ 重置该用户该 key 的所有会话
+    - 都不指定 → 重置全部
+    """
+    global _clients
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _client_lock:
+        if ckey is not None:
+            if ckey in _clients:
+                _clients.pop(ckey)
+                print(
+                    f"🔄 [{now_str}] Client 已重置 (user={ckey.user_id}, key={ckey.key_id}, session={ckey.session_id[:16]}...)"
+                )
+        elif user_id is not None and key_id is not None:
+            victims = [
+                k for k in _clients if k.user_id == user_id and k.key_id == key_id
+            ]
+            for k in victims:
+                _clients.pop(k, None)
+            print(
+                f"🔄 [{now_str}] Client 已重置 (user={user_id}, key={key_id}), 共 {len(victims)} 个会话"
+            )
+        else:
+            _clients.clear()
+            print(f"🔄 [{now_str}] 所有 Client 已重置")
+
+
+# ============ 后台定时刷新任务 ============
+def get_current_time_str():
+    """获取当前时间字符串"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_random_refresh_interval():
+    """获取随机刷新间隔"""
+    return random.randint(TOKEN_REFRESH_INTERVAL_MIN, TOKEN_REFRESH_INTERVAL_MAX)
+
+
+def background_token_refresh_thread():
+    """后台定时刷新 token 任务（独立线程版本，不依赖 asyncio）"""
+    global _background_refresh_thread_stop
+    print(f"🔄 [{get_current_time_str()}] 后台 Token 定时刷新任务已启动（线程模式）")
+
+    while not _background_refresh_thread_stop:
+        try:
+            # 随机等待间隔
+            interval = get_random_refresh_interval()
+            print(f"⏳ [{get_current_time_str()}] 下次刷新将在 {interval} 秒后")
+            time.sleep(interval)
+
+            if _background_refresh_thread_stop:
+                break
+
+            if not TOKEN_BACKGROUND_REFRESH:
+                continue
+
+            # 执行刷新
+            print(f"⏰ [{get_current_time_str()}] 后台定时刷新 Token...")
+            result = try_refresh_tokens(force=True)
+
+            if result["success"]:
+                print(
+                    f"✅ [{get_current_time_str()}] 后台刷新成功: {result['message']}"
+                )
+            else:
+                print(f"⚠️ [{get_current_time_str()}] 后台刷新失败: {result['message']}")
+
+        except Exception as e:
+            print(f"❌ [{get_current_time_str()}] 后台刷新异常: {e}")
+            time.sleep(60)  # 出错后等待 1 分钟再试
+
+    print(f"🛑 [{get_current_time_str()}] 后台 Token 定时刷新任务已停止（线程模式）")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时执行"""
+    global _background_refresh_task, _background_refresh_stop
+    global _background_refresh_thread, _background_refresh_thread_stop
+
+    load_config()
+    _background_refresh_stop = False
+
+    if TOKEN_BACKGROUND_REFRESH:
+        _background_refresh_thread_stop = False
+        _background_refresh_thread = threading.Thread(
+            target=background_token_refresh_thread, daemon=True
+        )
+        _background_refresh_thread.start()
+        print(
+            f"✅ [{get_current_time_str()}] 后台 Token 定时刷新已启用（线程模式，间隔: {TOKEN_REFRESH_INTERVAL_MIN}-{TOKEN_REFRESH_INTERVAL_MAX} 秒随机）"
+        )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时执行"""
+    global _background_refresh_task, _background_refresh_stop
+    global _background_refresh_thread, _background_refresh_thread_stop
+
+    # 停止 asyncio 版本（兼容旧代码）
+    _background_refresh_stop = True
+    if _background_refresh_task:
+        _background_refresh_task.cancel()
+        try:
+            await _background_refresh_task
+        except asyncio.CancelledError:
+            pass
+
+    # 停止 threading 版本
+    _background_refresh_thread_stop = True
+    if _background_refresh_thread:
+        _background_refresh_thread.join(timeout=5)
+    print("🛑 后台任务已停止")
+
+
+# ============ Tools 支持 ============
+def build_tools_prompt(tools: List[Dict]) -> str:
+    """将 tools 定义转换为提示词（仅注入规范化工具调用格式）"""
+    if not tools:
+        return ""
+
+    tools_schema = json.dumps(
+        [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "parameters": t["function"].get("parameters", {}),
+            }
+            for t in tools
+            if t.get("type") == "function"
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    prompt = (
+        "Available functions:\n"
+        f"{tools_schema}\n\n"
+        "Tool call protocol:\n"
+        "- When you need to call a function, output ONLY one or more ```tool_call``` blocks.\n"
+        "- Do not output prose, bullet points, explanations, markdown tables, or any extra text.\n"
+        "- Each ```tool_call``` block must contain exactly one JSON object.\n"
+        '- Use this exact shape: {"name":"function_name","arguments":{"param1":"value1"}}\n'
+        "- name must be one of the available function names.\n"
+        "- arguments must be a JSON object of function parameters.\n"
+        "- If multiple tool calls are needed, output multiple separate ```tool_call``` blocks."
+    )
+    return prompt
+
+
+def parse_tool_calls(
+    content: str, allowed_tool_names: Optional[set[str]] = None
+) -> tuple:
+    """
+    解析响应中的工具调用和思考过程
+    返回: (tool_calls列表, 剩余文本内容, 思考过程)
+    """
+    tool_calls = []
+    thinking = ""
+
+    # extract <think>...</think> or &#10094;...&#10095; thinking tags
+    think_patterns = [
+        r"<thinking>(.*?)</thinking>",
+        r"<think>(.*?)</think>",
+        r"\u6df1\u611f>(.*?)\u6df1\u611f>",
+        r"<reasoning>(.*?)</reasoning>",
+        r"<reason>(.*?)</reason>",
+        r"<reflect>(.*?)</reflect>",
+        r"<reflection>(.*?)</reflection>",
+        r"<thought>(.*?)</thought>",
+        r"\U0001f14d\U0001f14d(.*?)\U0001f14e\U0001f14e",
+    ]
+    cleaned = content
+    for pat in think_patterns:
+        m = re.search(pat, cleaned, re.DOTALL)
+        if m:
+            thinking = m.group(1).strip()
+            cleaned = re.sub(pat, "", cleaned, flags=re.DOTALL).strip()
+            break
+
+    def extract_json_blobs(text: str) -> List[str]:
+        """从文本中提取平衡的大括号 JSON 片段，支持嵌套对象和字符串转义。"""
+        blobs = []
+        i = 0
+        n = len(text)
+        while i < n:
+            start = text.find("{", i)
+            if start == -1:
+                break
+            depth = 0
+            in_string = False
+            escaped = False
+            for j in range(start, n):
+                ch = text[j]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            blobs.append(text[start : j + 1])
+                            i = j + 1
+                            break
+            else:
+                break
+            if i <= start:
+                i = start + 1
+        return blobs
+
+    # use cleaned content (without thinking tags) for tool parsing
+    candidates_list = []
+    code_block_pattern = r"```(?:tool_call|json)?\s*\n?(.*?)\n?```"
+    candidates_list = re.findall(code_block_pattern, cleaned, re.DOTALL)
+    if not candidates_list:
+        candidates_list = [cleaned]
+
+    def normalize_tool_call(call_data: Any, index: int) -> Optional[Dict[str, Any]]:
+        if not isinstance(call_data, dict):
+            return None
+
+        normalized_name = None
+        normalized_arguments: Any = {}
+        normalized_id = call_data.get("id")
+
+        if call_data.get("name"):
+            normalized_name = call_data.get("name")
+            normalized_arguments = call_data.get("arguments", {})
+        elif isinstance(call_data.get("function"), dict) and call_data["function"].get(
+            "name"
+        ):
+            normalized_name = call_data["function"].get("name")
+            normalized_arguments = call_data["function"].get("arguments", {})
+        elif isinstance(call_data.get("function_call"), dict) and call_data[
+            "function_call"
+        ].get("name"):
+            normalized_name = call_data["function_call"].get("name")
+            normalized_arguments = call_data["function_call"].get("arguments", {})
+        elif isinstance(call_data.get("tool_calls"), list):
+            return None
+
+        if not normalized_name:
+            return None
+
+        if allowed_tool_names and normalized_name not in allowed_tool_names:
+            return None
+
+        if isinstance(normalized_arguments, str):
+            normalized_arguments = normalized_arguments.strip()
+            if normalized_arguments:
+                try:
+                    parsed_args = json.loads(normalized_arguments)
+                    normalized_arguments = parsed_args
+                except Exception:
+                    pass
+            else:
+                normalized_arguments = {}
+
+        if normalized_arguments is None:
+            normalized_arguments = {}
+
+        if not isinstance(normalized_arguments, (dict, list)):
+            normalized_arguments = {"value": normalized_arguments}
+
+        return {
+            "id": normalized_id or f"call_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "index": index,
+            "function": {
+                "name": normalized_name,
+                "arguments": json.dumps(normalized_arguments, ensure_ascii=False),
+            },
+        }
+
+    seen = set()
+    next_index = 0
+    for candidate in candidates_list:
+        for blob in extract_json_blobs(candidate):
+            if blob in seen:
+                continue
+            seen.add(blob)
+            try:
+                call_data = json.loads(blob)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(call_data, list):
+                for item in call_data:
+                    normalized = normalize_tool_call(item, next_index)
+                    if normalized:
+                        tool_calls.append(normalized)
+                        next_index += 1
+                continue
+
+            if isinstance(call_data, dict) and isinstance(
+                call_data.get("tool_calls"), list
+            ):
+                for item in call_data.get("tool_calls", []):
+                    normalized = normalize_tool_call(item, next_index)
+                    if normalized:
+                        tool_calls.append(normalized)
+                        next_index += 1
+                continue
+
+            normalized = normalize_tool_call(call_data, next_index)
+            if normalized:
+                tool_calls.append(normalized)
+                next_index += 1
+
+    remaining = cleaned
+    for blob in seen:
+        remaining = remaining.replace(blob, "")
+    remaining = re.sub(r"```(?:tool_call|json)?\s*", "", remaining)
+    remaining = remaining.replace("```", "")
+    remaining = remaining.strip()
+
+    return tool_calls, remaining, thinking
+
+
+def get_allowed_tool_names(tools: Optional[List[ToolDefinition]]) -> set[str]:
+    if not tools:
+        return set()
+    return {
+        t.function.name
+        for t in tools
+        if getattr(t, "type", None) == "function" and getattr(t, "function", None)
+    }
+
+
+_STREAM_END = object()
+
+
+def _stream_next_or_end(stream_gen):
+    try:
+        return next(stream_gen)
+    except StopIteration:
+        return _STREAM_END
 
 
 def parse_cookie_string(cookie_str: str) -> dict:
@@ -407,361 +1023,6 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
         return result
 
 
-_clients = {}  # {key_id: GeminiClient} per-key client pool
-_client_lock = threading.Lock()
-_last_token_refresh = 0  # 上次 token 刷新时间
-_token_refresh_count = 0  # token 刷新次数统计
-
-
-def try_refresh_tokens(force: bool = False) -> dict:
-    """
-    尝试刷新 token — 更新所有已创建的 client
-
-    Args:
-        force: 是否强制刷新，忽略时间间隔
-
-    Returns:
-        dict: {"success": bool, "message": str, "snlm0e": str, "push_id": str}
-    """
-    global _clients, _last_token_refresh, _token_refresh_count, _config
-
-    result = {"success": False, "message": "", "snlm0e": "", "push_id": ""}
-
-    if not TOKEN_AUTO_REFRESH and not force:
-        result["message"] = "自动刷新已禁用"
-        return result
-
-    current_time = time.time()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 检查是否需要刷新（除非强制刷新）
-    if not force and (current_time - _last_token_refresh) < TOKEN_REFRESH_INTERVAL_MIN:
-        result["message"] = f"距离上次刷新不足 {TOKEN_REFRESH_INTERVAL_MIN} 秒"
-        return result
-
-    try:
-        # 使用任意已存在的 client 刷新，同时更新所有 client
-        any_client = None
-        with _client_lock:
-            for c in _clients.values():
-                any_client = c
-                break
-
-        if any_client is not None:
-            refresh_result = any_client.refresh_tokens()
-            if refresh_result["success"]:
-                if refresh_result["snlm0e"]:
-                    _config["SNLM0E"] = refresh_result["snlm0e"]
-                    result["snlm0e"] = refresh_result["snlm0e"]
-                if refresh_result["push_id"]:
-                    _config["PUSH_ID"] = refresh_result["push_id"]
-                    result["push_id"] = refresh_result["push_id"]
-
-                save_config()
-
-                # 将新 token 同步到所有已创建的 client
-                with _client_lock:
-                    for c in _clients.values():
-                        c.snlm0e = _config["SNLM0E"]
-                        c.push_id = _config.get("PUSH_ID") or None
-
-                _last_token_refresh = current_time
-                _token_refresh_count += 1
-                result["success"] = True
-                result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
-                print(
-                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
-                )
-            else:
-                result["message"] = refresh_result.get("error", "刷新失败")
-                print(f"⚠️ [{now_str}] Token 刷新失败: {result['message']}")
-        else:
-            # client 不存在，使用 fetch_tokens_from_page
-            cookies = _config.get("FULL_COOKIE", "")
-            if not cookies:
-                cookies = f"__Secure-1PSID={_config.get('SECURE_1PSID', '')}"
-                if _config.get("SECURE_1PSIDTS"):
-                    cookies += f"; __Secure-1PSIDTS={_config['SECURE_1PSIDTS']}"
-
-            tokens = fetch_tokens_from_page(cookies)
-            if tokens.get("snlm0e"):
-                _config["SNLM0E"] = tokens["snlm0e"]
-                result["snlm0e"] = tokens["snlm0e"]
-            if tokens.get("push_id"):
-                _config["PUSH_ID"] = tokens["push_id"]
-                result["push_id"] = tokens["push_id"]
-
-            if tokens.get("snlm0e"):
-                save_config()
-                _last_token_refresh = current_time
-                _token_refresh_count += 1
-                result["success"] = True
-                result["message"] = f"Token 刷新成功 (第 {_token_refresh_count} 次)"
-                print(
-                    f"✅ [{now_str}] Token 自动刷新成功 (第 {_token_refresh_count} 次)"
-                )
-            else:
-                result["message"] = "无法从页面获取新 token"
-
-        return result
-
-    except Exception as e:
-        result["message"] = f"刷新异常: {str(e)}"
-        print(f"❌ [{now_str}] Token 刷新异常: {e}")
-        return result
-
-
-def reset_client(key_id: int = None):
-    """重置 client。指定 key_id 只重置该用户的 client，否则重置全部"""
-    global _clients
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with _client_lock:
-        if key_id is not None:
-            if key_id in _clients:
-                _clients[key_id].reset()
-                del _clients[key_id]
-                print(f"🔄 [{now_str}] Client 已重置 (key_id={key_id})")
-        else:
-            _clients.clear()
-            print(f"🔄 [{now_str}] 所有 Client 已重置")
-
-
-# ============ 后台定时刷新任务 ============
-def get_current_time_str():
-    """获取当前时间字符串"""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def get_random_refresh_interval():
-    """获取随机刷新间隔"""
-    return random.randint(TOKEN_REFRESH_INTERVAL_MIN, TOKEN_REFRESH_INTERVAL_MAX)
-
-
-def background_token_refresh_thread():
-    """后台定时刷新 token 任务（独立线程版本，不依赖 asyncio）"""
-    global _background_refresh_thread_stop
-    print(f"🔄 [{get_current_time_str()}] 后台 Token 定时刷新任务已启动（线程模式）")
-
-    while not _background_refresh_thread_stop:
-        try:
-            # 随机等待间隔
-            interval = get_random_refresh_interval()
-            print(f"⏳ [{get_current_time_str()}] 下次刷新将在 {interval} 秒后")
-            time.sleep(interval)
-
-            if _background_refresh_thread_stop:
-                break
-
-            if not TOKEN_BACKGROUND_REFRESH:
-                continue
-
-            # 执行刷新
-            print(f"⏰ [{get_current_time_str()}] 后台定时刷新 Token...")
-            result = try_refresh_tokens(force=True)
-
-            if result["success"]:
-                print(
-                    f"✅ [{get_current_time_str()}] 后台刷新成功: {result['message']}"
-                )
-            else:
-                print(f"⚠️ [{get_current_time_str()}] 后台刷新失败: {result['message']}")
-
-        except Exception as e:
-            print(f"❌ [{get_current_time_str()}] 后台刷新异常: {e}")
-            time.sleep(60)  # 出错后等待 1 分钟再试
-
-    print(f"🛑 [{get_current_time_str()}] 后台 Token 定时刷新任务已停止（线程模式）")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时执行"""
-    global _background_refresh_task, _background_refresh_stop
-    global _background_refresh_thread, _background_refresh_thread_stop
-
-    load_config()
-    _background_refresh_stop = False
-
-    if TOKEN_BACKGROUND_REFRESH:
-        _background_refresh_thread_stop = False
-        _background_refresh_thread = threading.Thread(
-            target=background_token_refresh_thread, daemon=True
-        )
-        _background_refresh_thread.start()
-        print(
-            f"✅ [{get_current_time_str()}] 后台 Token 定时刷新已启用（线程模式，间隔: {TOKEN_REFRESH_INTERVAL_MIN}-{TOKEN_REFRESH_INTERVAL_MAX} 秒随机）"
-        )
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时执行"""
-    global _background_refresh_task, _background_refresh_stop
-    global _background_refresh_thread, _background_refresh_thread_stop
-
-    # 停止 asyncio 版本（兼容旧代码）
-    _background_refresh_stop = True
-    if _background_refresh_task:
-        _background_refresh_task.cancel()
-        try:
-            await _background_refresh_task
-        except asyncio.CancelledError:
-            pass
-
-    # 停止 threading 版本
-    _background_refresh_thread_stop = True
-    if _background_refresh_thread:
-        _background_refresh_thread.join(timeout=5)
-    print("🛑 后台任务已停止")
-
-
-# ============ Tools 支持 ============
-def build_tools_prompt(tools: List[Dict]) -> str:
-    """将 tools 定义转换为提示词"""
-    if not tools:
-        return ""
-
-    tools_schema = json.dumps(
-        [
-            {
-                "name": t["function"]["name"],
-                "description": t["function"].get("description", ""),
-                "parameters": t["function"].get("parameters", {}),
-            }
-            for t in tools
-            if t.get("type") == "function"
-        ],
-        ensure_ascii=False,
-        indent=2,
-    )
-
-    prompt = f"""[系统指令] 你是一个遵循 OpenAI 工具调用协议的助手。
-
-当需要使用工具时，先在 <think> 标签中简要思考，然后输出工具调用 JSON。
-如果不需要工具，可以正常回答。
-
-可用函数:
-{tools_schema}
-
-严格规则:
-1. 如果需要调用函数，先输出 <think>思考过程</think>，然后只输出以下格式:
-```tool_call
-{{"name": "函数名", "arguments": {{"参数": "值"}}}}
-```
-2. arguments 必须是合法 JSON 对象
-3. 如果一次任务需要多个工具，按顺序分多轮调用
-
-用户请求: """
-    return prompt
-
-
-def parse_tool_calls(content: str) -> tuple:
-    """
-    解析响应中的工具调用和思考过程
-    返回: (tool_calls列表, 剩余文本内容, 思考过程)
-    """
-    tool_calls = []
-    thinking = ""
-
-    # extract <think>...</think> or &#10094;...&#10095; thinking tags
-    think_patterns = [
-        r"<thinking>(.*?)</thinking>",
-        r"<think>(.*?)</think>",
-        r"\u6df1\u611f>(.*?)\u6df1\u611f>",
-        r"<reasoning>(.*?)</reasoning>",
-        r"<reason>(.*?)</reason>",
-        r"<reflect>(.*?)</reflect>",
-        r"<reflection>(.*?)</reflection>",
-        r"<thought>(.*?)</thought>",
-        r"\U0001f14d\U0001f14d(.*?)\U0001f14e\U0001f14e",
-    ]
-    cleaned = content
-    for pat in think_patterns:
-        m = re.search(pat, cleaned, re.DOTALL)
-        if m:
-            thinking = m.group(1).strip()
-            cleaned = re.sub(pat, "", cleaned, flags=re.DOTALL).strip()
-            break
-
-    def extract_json_blobs(text: str) -> List[str]:
-        """从文本中提取平衡的大括号 JSON 片段，支持嵌套对象和字符串转义。"""
-        blobs = []
-        i = 0
-        n = len(text)
-        while i < n:
-            start = text.find("{", i)
-            if start == -1:
-                break
-            depth = 0
-            in_string = False
-            escaped = False
-            for j in range(start, n):
-                ch = text[j]
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif ch == "\\":
-                        escaped = True
-                    elif ch == '"':
-                        in_string = False
-                else:
-                    if ch == '"':
-                        in_string = True
-                    elif ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            blobs.append(text[start : j + 1])
-                            i = j + 1
-                            break
-            else:
-                break
-            if i <= start:
-                i = start + 1
-        return blobs
-
-    # use cleaned content (without thinking tags) for tool parsing
-    candidates_list = []
-    code_block_pattern = r"```(?:tool_call|json)?\s*\n?(.*?)\n?```"
-    candidates_list = re.findall(code_block_pattern, cleaned, re.DOTALL)
-    if not candidates_list:
-        candidates_list = [cleaned]
-
-    seen = set()
-    for candidate in candidates_list:
-        for blob in extract_json_blobs(candidate):
-            if blob in seen:
-                continue
-            seen.add(blob)
-            try:
-                call_data = json.loads(blob)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(call_data, dict) and call_data.get("name"):
-                tool_calls.append(
-                    {
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                        "type": "function",
-                        "function": {
-                            "name": call_data.get("name", ""),
-                            "arguments": json.dumps(
-                                call_data.get("arguments", {}), ensure_ascii=False
-                            ),
-                        },
-                    }
-                )
-
-    remaining = cleaned
-    for blob in seen:
-        remaining = remaining.replace(blob, "")
-    remaining = re.sub(r"```(?:tool_call|json)?\s*", "", remaining)
-    remaining = remaining.replace("```", "")
-    remaining = remaining.strip()
-
-    return tool_calls, remaining, thinking
-
-
 def load_config():
     """
     加载配置，优先级:
@@ -776,6 +1037,9 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+                # 总是加载 CUSTOM_APIS，不依赖 Token
+                if "CUSTOM_APIS" in saved:
+                    _config["CUSTOM_APIS"] = saved["CUSTOM_APIS"]
                 if saved.get("SNLM0E") and saved.get("SECURE_1PSID"):
                     _config.update(saved)
                     loaded_from_json = True
@@ -799,7 +1063,12 @@ def save_config():
         json.dump(_config, f, indent=2, ensure_ascii=False)
 
 
-def get_client(key_id: int = 0, auto_refresh: bool = True):
+def get_client(ckey: ClientKey, auto_refresh: bool = True) -> ClientEntry:
+    """获取或创建 ClientEntry（含 GeminiClient + 请求锁）。
+
+    每个 (user_id, key_id, session_id) 组合都有独立的 GeminiClient 实例，
+    确保会话完全隔离。
+    """
     global _clients, _last_token_refresh
 
     if not _config.get("SNLM0E") or not _config.get("SECURE_1PSID"):
@@ -812,8 +1081,12 @@ def get_client(key_id: int = 0, auto_refresh: bool = True):
             try_refresh_tokens()
 
     with _client_lock:
-        if key_id in _clients:
-            return _clients[key_id]
+        _evict_if_needed_locked()
+
+        entry = _clients.get(ckey)
+        if entry is not None:
+            entry.last_used = time.time()
+            return entry
 
         cookies = f"__Secure-1PSID={_config['SECURE_1PSID']}"
         if _config.get("SECURE_1PSIDTS"):
@@ -829,9 +1102,7 @@ def get_client(key_id: int = 0, auto_refresh: bool = True):
         if _config.get("APISID"):
             cookies += f"; APISID={_config['APISID']}"
 
-        media_base_url = (
-            MEDIA_BASE_URL if MEDIA_BASE_URL else f"http://localhost:{PORT}"
-        )
+        media_base_url = MEDIA_BASE_URL or ""
 
         from client import GeminiClient
 
@@ -844,34 +1115,19 @@ def get_client(key_id: int = 0, auto_refresh: bool = True):
             debug=False,
             media_base_url=media_base_url,
         )
-        _clients[key_id] = c
-        print(
-            f"🆕 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 新 Client 已创建 (key_id={key_id})"
+        entry = ClientEntry(
+            client=c, lock=asyncio.Lock(), created_at=time.time(), last_used=time.time()
         )
-        return c
-
-
-def get_login_html():
-    html_path = os.path.join(STATIC_DIR, "html", "login.html")
-    with open(html_path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def get_admin_html():
-    html_path = os.path.join(STATIC_DIR, "html", "admin.html")
-    body_path = os.path.join(STATIC_DIR, "html", "admin_body.html")
-    with open(html_path, "r", encoding="utf-8") as f:
-        html = f.read()
-    with open(body_path, "r", encoding="utf-8") as f:
-        body = f.read()
-    html = html.replace("{{ADMIN_BODY}}", body)
-    html = html.replace("{{PORT}}", str(PORT))
-    return html
+        _clients[ckey] = entry
+        print(
+            f"🆕 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 新 Client 已创建 (user={ckey.user_id}, key={ckey.key_id}, session={ckey.session_id[:16]}...)"
+        )
+        return entry
 
 
 @app.get("/admin/login", response_class=HTMLResponse)
 async def admin_login_page():
-    return get_login_html()
+    return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
 
 @app.post("/admin/login")
@@ -1057,9 +1313,7 @@ async def admin_toggle_admin(user_id: int, request: Request):
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
-    if not verify_admin_session(request):
-        return RedirectResponse(url="/admin/login", status_code=302)
-    return get_admin_html()
+    return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
 
 @app.post("/admin/save")
@@ -1123,19 +1377,36 @@ async def admin_save(request: Request):
             _config["MODEL_IDS"]["flash"] = model_ids["flash"]
         if model_ids.get("pro"):
             _config["MODEL_IDS"]["pro"] = model_ids["pro"]
-        if model_ids.get("thinking"):
-            _config["MODEL_IDS"]["thinking"] = model_ids["thinking"]
+        if model_ids.get("lite"):
+            _config["MODEL_IDS"]["lite"] = model_ids["lite"]
 
-    save_config()
-    global _clients
-    with _client_lock:
-        for kid, c in _clients.items():
-            c.snlm0e = _config["SNLM0E"]
-            c.push_id = _config.get("PUSH_ID") or None
-            if full_cookie:
-                c._set_cookies_from_string(full_cookie)
-            c.reset()
-            print(f"🔄 Client 配置已更新并重置上下文 (key_id={kid})")
+        save_config()
+        # Cookie 变更时需要重建 client（cookie jar 已过期），否则只更新 token
+        cookie_changed = any(
+            parsed.get(k) != _config.get(k)
+            for k in [
+                "SECURE_1PSID",
+                "SECURE_1PSIDTS",
+                "SAPISID",
+                "SID",
+                "HSID",
+                "SSID",
+                "APISID",
+            ]
+            if parsed.get(k)
+        )  # 只要 parsed 里有非空值就算有变化
+        with _client_lock:
+            if cookie_changed or full_cookie:
+                # Cookie 变更 → 清空所有 client 池，下次请求会自动重建
+                _clients.clear()
+                print(
+                    f"🔄 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cookie 已变更，所有 Client 将在下次请求时重建"
+                )
+            else:
+                # 仅 token 变更 → 原地更新，不清除对话上下文
+                for entry in _clients.values():
+                    entry.client.snlm0e = _config["SNLM0E"]
+                    entry.client.push_id = _config.get("PUSH_ID") or None
 
     # 构建结果信息
     parsed_fields = [
@@ -1157,7 +1428,9 @@ async def admin_save(request: Request):
     models_msg = f"，{len(_config['MODELS'])} 个模型" if _config.get("MODELS") else ""
 
     try:
-        get_client(key_id=0)  # 验证配置可用
+        get_client(
+            ClientKey(user_id=0, key_id=0, session_id="admin-validate")
+        )  # 验证配置可用
         return {
             "success": True,
             "message": f"配置已保存并验证成功！AT Token ✓{push_id_msg}{models_msg}",
@@ -1176,6 +1449,23 @@ async def admin_get_config(request: Request):
     if not verify_admin_session(request):
         raise HTTPException(status_code=401, detail="未登录")
     return _config
+
+
+@app.get("/admin/custom-apis")
+async def admin_get_custom_apis(request: Request):
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"success": True, "data": _config.get("CUSTOM_APIS", [])}
+
+
+@app.post("/admin/custom-apis")
+async def admin_save_custom_apis(request: Request):
+    if not verify_admin_session(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    data = await request.json()
+    _config["CUSTOM_APIS"] = data.get("apis", [])
+    save_config()
+    return {"success": True, "message": "保存成功"}
 
 
 @app.get("/admin/current-key")
@@ -1449,7 +1739,7 @@ async def admin_get_active_prompt(ptype: str, request: Request):
 
 class ChatMessage(BaseModel):
     role: str
-    content: Union[str, List[Dict[str, Any]]]
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
@@ -1595,9 +1885,25 @@ async def root():
 @app.get("/v1/models")
 async def list_models(authorization: str = Header(None)):
     verify_api_key(authorization, db)
-    # 合并：配置中的 Gemini 模型 + ALL_MODELS 中的代理模型
+    # 合并：配置中的 Gemini 模型 + 动态代理模型
     gemini_models = list(_config.get("MODELS", DEFAULT_MODELS))
-    models = gemini_models + [m for m in ALL_MODELS if m not in gemini_models]
+    models = []
+    seen = set()
+
+    for raw_model in gemini_models:
+        public_model = f"gemini/{raw_model}"
+        if public_model not in seen:
+            seen.add(public_model)
+            models.append(public_model)
+
+    for api in _config.get("CUSTOM_APIS", []):
+        group_name = api.get("name", "custom")
+        for raw_model in api.get("models", []):
+            public_model = f"{group_name}/{raw_model}"
+            if public_model not in seen:
+                seen.add(public_model)
+                models.append(public_model)
+
     created = int(time.time())
     return {
         "object": "list",
@@ -1657,6 +1963,7 @@ async def reset_client_api(authorization: str = Header(None)):
 
 def log_api_call(request_data: dict, response_data: dict, error: str = None):
     """记录 API 调用日志到文件"""
+    return
     import datetime
 
     log_entry = {
@@ -1685,22 +1992,37 @@ async def proxy_chat_completions(
     if not api_url or not api_key:
         raise HTTPException(status_code=500, detail="外部 API 未配置")
 
+    request_log = {
+        "model": request.model,
+        "upstream_model": to_upstream_model_id(request.model),
+        "stream": request.stream,
+        "proxy_api_url": api_url,
+        "messages": [],
+        "tools": [t.model_dump() for t in request.tools] if request.tools else None,
+    }
+
     # 转换消息格式为外部 API 格式
     messages = []
     for m in request.messages:
         content = m.content
         message_payload = {"role": m.role, "content": content}
+        msg_log = {"role": m.role}
         if m.name:
             message_payload["name"] = m.name
+            msg_log["name"] = m.name
         if m.tool_call_id:
             message_payload["tool_call_id"] = m.tool_call_id
+            msg_log["tool_call_id"] = m.tool_call_id
         if m.tool_calls:
             message_payload["tool_calls"] = m.tool_calls
+            msg_log["tool_calls"] = m.tool_calls
         messages.append(message_payload)
+        msg_log["content"] = content
+        request_log["messages"].append(msg_log)
 
     # 构建外部 API 请求
     payload = {
-        "model": request.model,
+        "model": to_upstream_model_id(request.model),
         "messages": messages,
         "stream": request.stream,
     }
@@ -1725,46 +2047,159 @@ async def proxy_chat_completions(
             "Content-Type": "application/json",
         }
 
-        # 非流式请求
-        if not request.stream:
+        # 检测图片模型（上游不支持 SSE 流式）
+        upstream_model = to_upstream_model_id(request.model)
+        is_image_model = (
+            "image" in upstream_model.lower() or "dall" in upstream_model.lower()
+        )
+
+        # 非流式请求或图片模型（强制非流式上传）
+        if not request.stream or is_image_model:
+            # 图片模型强制给上游发 stream=False，避免 SSE 连接失败
+            actual_payload = {**payload, "stream": False} if is_image_model else payload
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
                     f"{api_url}/chat/completions",
-                    json=payload,
+                    json=actual_payload,
                     headers=headers,
                 )
                 resp.raise_for_status()
                 result = resp.json()
 
-                if "usage" in result:
-                    try:
-                        db_manager.record_usage(
-                            user_id,
-                            key_id,
-                            request.model,
-                            result["usage"].get("prompt_tokens", 0),
-                            result["usage"].get("completion_tokens", 0),
-                        )
-                    except Exception:
-                        pass
-                return JSONResponse(content=result)
+            if "usage" in result:
+                try:
+                    db_manager.record_usage(
+                        user_id,
+                        key_id,
+                        request.model,
+                        result["usage"].get("prompt_tokens", 0),
+                        result["usage"].get("completion_tokens", 0),
+                    )
+                except Exception:
+                    pass
+            log_api_call(request_log, result)
+
+            # 图片模型：下载外部图片到本地缓存，替换 Markdown URL 为本地路径
+            if is_image_model:
+                content = (
+                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                )
+                if content:
+                    import hashlib
+                    import re as _re
+
+                    async def _cache_markdown_images(text: str) -> str:
+                        """下载 Markdown 中的外部图片，替换为本地缓存路径"""
+                        urls = _re.findall(r"!\[([^\]]*)\]\(([^)]+)\)", text)
+                        if not urls:
+                            return text
+                        replacements = {}
+                        for alt, url in urls:
+                            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+                            # 检查缓存
+                            cached_path = None
+                            for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+                                cached = os.path.join(
+                                    MEDIA_CACHE_DIR, "proxy_" + url_hash + ext
+                                )
+                                if os.path.exists(cached):
+                                    cached_path = "/media/proxy_" + url_hash + ext
+                                    break
+                            if not cached_path:
+                                # 下载并缓存
+                                try:
+                                    async with httpx.AsyncClient(
+                                        timeout=30,
+                                        follow_redirects=True,
+                                        verify=False,
+                                    ) as client:
+                                        resp = await client.get(url)
+                                        resp.raise_for_status()
+                                        data = resp.content
+                                        ct = resp.headers.get("content-type", "")
+                                        ext = ".png"
+                                        if "png" in ct:
+                                            ext = ".png"
+                                        elif "jpeg" in ct or "jpg" in ct:
+                                            ext = ".jpg"
+                                        elif "gif" in ct:
+                                            ext = ".gif"
+                                        elif "webp" in ct:
+                                            ext = ".webp"
+                                        cached_file = os.path.join(
+                                            MEDIA_CACHE_DIR,
+                                            "proxy_" + url_hash + ext,
+                                        )
+                                        with open(cached_file, "wb") as f:
+                                            f.write(data)
+                                        cached_path = "/media/proxy_" + url_hash + ext
+                                except Exception:
+                                    pass  # 下载失败则保留原始 URL
+                            if cached_path:
+                                replacements[url] = cached_path
+
+                        def _replace_url(m):
+                            alt = m.group(1)
+                            url = m.group(2)
+                            local_url = replacements.get(url)
+                            if local_url:
+                                return f"![{alt}]({local_url})"
+                            return m.group(0)
+
+                        return _re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", _replace_url, text)
+
+                    new_content = await _cache_markdown_images(content)
+                    if new_content != content:
+                        result["choices"][0]["message"]["content"] = new_content
+
+            # 如果前端期望 SSE（stream=True），将 JSON 响应包装为 SSE 格式
+            if request.stream:
+                content = (
+                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                )
+
+                async def json_as_sse():
+                    chunk = {
+                        "id": result.get("id", ""),
+                        "object": "chat.completion.chunk",
+                        "created": result.get("created", 0),
+                        "model": result.get("model", ""),
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": content} if content else {},
+                                "finish_reason": result.get("choices", [{}])[0].get(
+                                    "finish_reason", "stop"
+                                ),
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(json_as_sse(), media_type="text/event-stream")
+
+            return JSONResponse(content=result)
 
         # 流式请求：透传 SSE 并记录 usage
         async def stream_response():
             collected = ""
-            async with httpx.AsyncClient(
-                timeout=120.0, follow_redirects=True
-            ) as stream_client:
-                async with stream_client.stream(
-                    "POST",
-                    f"{api_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                ) as stream_resp:
-                    async for chunk in stream_resp.aiter_text():
-                        if chunk:
-                            collected += chunk
-                            yield chunk
+            try:
+                async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as stream_client:
+                    async with stream_client.stream(
+                        "POST",
+                        f"{api_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    ) as stream_resp:
+                        async for chunk in stream_resp.aiter_text():
+                            if chunk:
+                                collected += chunk
+                                yield chunk
+            except Exception as e:
+                # 如果中途断开，输出错误信息
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            
             # 流结束后从 collected SSE 数据中提取 usage
             try:
                 for line in collected.split("\n"):
@@ -1783,6 +2218,8 @@ async def proxy_chat_completions(
             except Exception:
                 pass
 
+            log_api_call(request_log, {"streamed": True, "raw_sse": collected[:20000]})
+
         return StreamingResponse(
             stream_response(),
             media_type="text/event-stream",
@@ -1794,11 +2231,13 @@ async def proxy_chat_completions(
         )
 
     except httpx.HTTPStatusError as e:
+        log_api_call(request_log, None, error=f"外部 API 错误: {e.response.text}")
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"外部 API 错误: {e.response.text}",
         )
     except Exception as e:
+        log_api_call(request_log, None, error=f"代理请求失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"代理请求失败: {str(e)}")
 
 
@@ -1806,60 +2245,34 @@ async def proxy_chat_completions(
 async def chat_completions(
     request: ChatCompletionRequest,
     authorization: str = Header(None),
-    session_id: str = None,
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = None,  # 向后兼容，优先使用 X-Session-Id
 ):
+    upstream_model = to_upstream_model_id(request.model)
+
     # 验证API Key并获取user_id, key_id用于统计
     auth_result = verify_api_key(authorization, db)
     user_id = auth_result.get("user_id", 0)
     key_id = auth_result.get("key_id", 0)
 
     # 代理模型：直接转发到外部 API
-    if request.model in PROXY_MODELS and EXTERNAL_API_URL:
-        return await proxy_chat_completions(
-            request,
-            authorization,
-            db,
-            user_id,
-            key_id,
-            EXTERNAL_API_URL,
-            EXTERNAL_API_KEY,
-        )
-    if request.model in PROXY_MODELS_4 and EXTERNAL_API_URL:
-        return await proxy_chat_completions(
-            request,
-            authorization,
-            db,
-            user_id,
-            key_id,
-            EXTERNAL_API_URL,
-            EXTERNAL_API_KEY_4 or EXTERNAL_API_KEY,
-        )
-    if request.model in PROXY_MODELS_2 and EXTERNAL_API_URL_2:
-        return await proxy_chat_completions(
-            request,
-            authorization,
-            db,
-            user_id,
-            key_id,
-            EXTERNAL_API_URL_2,
-            EXTERNAL_API_KEY_2,
-        )
-    if request.model in PROXY_MODELS_3 and EXTERNAL_API_URL_3:
-        return await proxy_chat_completions(
-            request,
-            authorization,
-            db,
-            user_id,
-            key_id,
-            EXTERNAL_API_URL_3,
-            EXTERNAL_API_KEY_3,
-        )
+    for api in _config.get("CUSTOM_APIS", []):
+        group_name = api.get("name", "custom")
+        raw_models = set(api.get("models", []))
+        if model_matches_group(request.model, group_name, raw_models) and api.get("url"):
+            return await proxy_chat_completions(
+                request,
+                authorization,
+                db,
+                user_id,
+                key_id,
+                api.get("url"),
+                api.get("key", ""),
+            )
 
-    # 如果提供了 session_id，使用它作为独立的 session 标识
-    if session_id:
-        user_id = hash(session_id) % 1000000
-        if user_id < 0:
-            user_id = -user_id
+    # 解析会话隔离键（X-Session-Id 优先，session_id 兼容旧版）
+    effective_session_id = x_session_id or session_id
+    ckey = resolve_client_key(auth_result, effective_session_id)
 
     # 记录请求入参 (图片内容截断显示)
     request_log = {
@@ -1914,17 +2327,18 @@ async def chat_completions(
 
     try:
         if request.new_session:
-            print(f"[SESSION] 显式请求新会话(key_id={key_id})，重置会话上下文")
+            print(
+                f"[SESSION] 显式请求新会话(user={ckey.user_id}, key={ckey.key_id}, session={ckey.session_id[:16]}...)，重置会话上下文"
+            )
             with _client_lock:
-                if key_id in _clients:
-                    _clients[key_id].reset()
+                _clients.pop(ckey, None)
 
-        client = get_client(key_id=key_id)
+        entry = get_client(ckey)
 
         # 处理消息
         messages = []
         for m in request.messages:
-            content = m.content
+            content = m.content if m.content is not None else ""
             message_payload = {"role": m.role, "content": content}
             if m.name:
                 message_payload["name"] = m.name
@@ -1940,175 +2354,569 @@ async def chat_completions(
         if request.function_call is not None and not request.tool_choice:
             request.tool_choice = request.function_call
 
+        allowed_tool_names = get_allowed_tool_names(request.tools)
+
         if request.tools:
             tools_prompt = build_tools_prompt([t.model_dump() for t in request.tools])
             if tools_prompt:
-                messages = [{"role": "system", "content": tools_prompt}] + messages
+                # Append tool schema to last user message instead of injecting a system message.
+                # This avoids overriding the caller's own system prompt / instructions.
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        user_content = messages[i].get("content", "")
+                        if isinstance(user_content, str):
+                            messages[i]["content"] = (
+                                user_content + "\n\n" + tools_prompt
+                            )
+                        elif isinstance(user_content, list):
+                            user_content.append({"type": "text", "text": tools_prompt})
+                        break
 
-        # 统一走非流式拿到完整响应，解析 tool_calls，再以 SSE 推流
-        response = client.chat(messages=messages, model=request.model)
-        reply_content = response.choices[0].message.content
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-        created_time = int(time.time())
+        # 请求级序列化锁：同一会话的并发请求排队执行，不同会话完全并行
+        # 锁仅覆盖 client.chat() 调用（会修改 GeminiClient 内部状态），
+        # 流式推送和响应构建只读取已计算的局部变量，无需持锁
+        async with entry.lock:
+            client = entry.client
+            if (
+                "lite" in upstream_model.lower()
+                or "thinking" in upstream_model.lower()
+                or "think" in upstream_model.lower()
+            ):
+                client.debug = True
 
-        # 解析工具调用和思考过程（无论是否有 tools 都提取 thinking）
-        tool_calls, final_content, gemini_thinking = parse_tool_calls(reply_content)
-        if not request.tools:
-            tool_calls = []
+            # 先用 chat() 相同的逻辑准备消息（处理图片、工具、system prompt 等）
+            text_parts = []
+            images = []
 
-        # 如果没有解析出工具调用，但请求明确要求工具，保留原始内容返回给客户端
-        if request.tools and not tool_calls:
-            # 尝试更宽松的匹配：在整段回复中找 opencode 相关的 JSON
-            import re as re_loose
+            if messages:
+                if client.conversation_id and client.conversation_id.strip():
+                    # 增量模式：只发最新消息
+                    last_msg = messages[-1]
+                    role = last_msg.get("role", "user")
+                    content = last_msg.get("content", "")
+                    if role == "user":
+                        t, imgs = client._parse_content(content)
+                        if t:
+                            text_parts.append(t)
+                        if imgs:
+                            images.extend(imgs)
+                    elif role == "tool":
+                        tool_call_id = last_msg.get("tool_call_id", "")
+                        tool_name = last_msg.get("name", "")
+                        content_text = str(content) if content is not None else ""
+                        if content_text:
+                            if tool_call_id or tool_name:
+                                label = f"Tool result"
+                                if tool_name:
+                                    label += f" ({tool_name})"
+                                if tool_call_id:
+                                    label += f" [{tool_call_id}]"
+                                text_parts.append(f"{label}:\n{content_text}")
+                            else:
+                                text_parts.append(content_text)
+                    elif role == "assistant":
+                        tool_calls_data = last_msg.get("tool_calls") or []
+                        if tool_calls_data:
+                            for tc in tool_calls_data:
+                                fn = (tc or {}).get("function", {})
+                                tc_id = (tc or {}).get("id", "")
+                                name = fn.get("name", "")
+                                args = fn.get("arguments", "")
+                                header = "Assistant requested tool call"
+                                if tc_id:
+                                    header += f" [{tc_id}]"
+                                text_parts.append(f"{header}: {name}({args})")
+                        elif isinstance(content, str) and content:
+                            text_parts.append(content)
+                else:
+                    # 全量模式：发送所有消息
+                    for msg in messages:
+                        role = msg.get("role", "user")
+                        content = msg.get("content", "")
+                        if role == "user":
+                            t, imgs = client._parse_content(content)
+                            if t:
+                                text_parts.append(t)
+                            if imgs:
+                                images.extend(imgs)
+                        elif role == "assistant":
+                            if isinstance(content, str) and content:
+                                text_parts.append(content)
+                            elif isinstance(content, list) and content:
+                                content_text, _ = client._parse_content(content)
+                                if content_text:
+                                    text_parts.append(content_text)
+                        elif role == "system":
+                            if isinstance(content, str) and content:
+                                text_parts.insert(0, content)
+                        elif role == "tool":
+                            tool_call_id = msg.get("tool_call_id", "")
+                            tool_name = msg.get("name", "")
+                            content_text = str(content) if content is not None else ""
+                            if content_text:
+                                if tool_call_id or tool_name:
+                                    label = "Tool result"
+                                    if tool_name:
+                                        label += f" ({tool_name})"
+                                    if tool_call_id:
+                                        label += f" [{tool_call_id}]"
+                                    text_parts.append(f"{label}:\n{content_text}")
+                                else:
+                                    text_parts.append(content_text)
 
-            try:
-                # 先找 opencode 关键字附近的 JSON 块
-                lower = reply_content.lower()
-                idx = lower.find("opencode")
-                if idx >= 0:
-                    snippet = reply_content[max(0, idx - 50) : idx + 500]
-                    # 提取大括号内的 JSON
-                    brace_start = snippet.find("{")
-                    if brace_start >= 0:
-                        depth = 0
-                        for i in range(brace_start, len(snippet)):
-                            if snippet[i] == "{":
-                                depth += 1
-                            elif snippet[i] == "}":
-                                depth -= 1
-                                if depth == 0:
-                                    blob = snippet[brace_start : i + 1]
-                                    try:
-                                        data = json.loads(blob)
-                                        if (
-                                            isinstance(data, dict)
-                                            and data.get("name", "").lower()
-                                            == "opencode"
-                                        ):
-                                            args = data.get("arguments", {})
-                                            tool_calls.append(
+            text = "\n\n".join(text_parts)
+            from client import Message as _Msg
+
+            client.messages.append(_Msg(role="user", content=text))
+
+            # 上传图片
+            image_paths = []
+            if images:
+                if not client.push_id:
+                    pass  # 无 push_id，跳过图片
+                else:
+                    try:
+                        for img in images:
+                            img_data = base64.b64decode(img["data"])
+                            path = client._upload_image(img_data, img["mime_type"])
+                            image_paths.append(path)
+                    except Exception:
+                        image_paths = []
+
+            should_force_postprocessed_stream = (
+                request.stream
+                and request.tools is None
+                and not images
+                and any(
+                    keyword in text
+                    for keyword in [
+                        "生成",
+                        "画",
+                        "绘制",
+                        "图片",
+                        "图像",
+                        "照片",
+                        "插画",
+                        "海报",
+                        "猫娘",
+                        "image",
+                        "draw",
+                        "illustration",
+                        "picture",
+                        "photo",
+                    ]
+                )
+            )
+
+            if request.stream:
+                # ====== 真流式：使用 client.chat_stream() 边从 Gemini 获取边推送 ======
+                completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                created_time = int(time.time())
+
+                # 发送 SSE 头
+                async def generate_real_stream():
+                    # 第一个 chunk: role
+                    first_chunk = ChatCompletionChunkResponse(
+                        id=completion_id,
+                        created=created_time,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0, delta={"role": "assistant"}, finish_reason=None
+                            )
+                        ],
+                    )
+                    yield f"data: {json.dumps(first_chunk.model_dump(), ensure_ascii=False)}\n\n"
+
+                    full_content = ""
+                    pending_content = ""
+                    content_was_streamed = False
+                    response = None
+
+                    # 使用 chat_stream 在线程中获取增量文本 / 思路
+                    stream_gen = client.chat_stream(
+                        text=text,
+                        images=images if image_paths else None,
+                        model=upstream_model,
+                        messages=None,
+                    )
+
+                    loop = asyncio.get_event_loop()
+
+                    while True:
+                        try:
+                            # 在线程中获取下一个增量（非阻塞）
+                            stream_item = await loop.run_in_executor(
+                                None, _stream_next_or_end, stream_gen
+                            )
+                            if stream_item is _STREAM_END:
+                                break
+                            if not stream_item:
+                                continue
+
+                            item_type = (
+                                stream_item.get("type")
+                                if isinstance(stream_item, dict)
+                                else "content"
+                            )
+                            item_text = (
+                                stream_item.get("text", "")
+                                if isinstance(stream_item, dict)
+                                else str(stream_item)
+                            )
+
+                            if item_type == "reasoning":
+                                reasoning_chunk = ChatCompletionChunkResponse(
+                                    id=completion_id,
+                                    created=created_time,
+                                    model=request.model,
+                                    choices=[
+                                        ChatCompletionChunkChoice(
+                                            index=0,
+                                            delta={"reasoning_content": item_text},
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                )
+                                yield f"data: {json.dumps(reasoning_chunk.model_dump(), ensure_ascii=False)}\n\n"
+                                continue
+
+                            new_text = item_text
+                            if should_force_postprocessed_stream and new_text:
+                                new_text = re.sub(
+                                    r"https?://googleusercontent\.com/(?:image_generation_content|video_gen_chip)/\d+\s*",
+                                    "",
+                                    new_text,
+                                )
+
+                            if new_text:
+                                full_content += new_text
+                                pending_content += new_text
+                                stripped_probe = pending_content.lstrip()
+
+                                if stripped_probe:
+                                    looks_like_tool_prefix = (
+                                        stripped_probe.startswith(
+                                            "```tool_call"
+                                        )
+                                        or stripped_probe.startswith("```json")
+                                        or stripped_probe.startswith("{")
+                                        or stripped_probe.startswith("[")
+                                    )
+                                    incomplete_tool_prefix = (
+                                        stripped_probe
+                                        in {
+                                            "`",
+                                            "``",
+                                            "```",
+                                            "```t",
+                                            "```to",
+                                            "```too",
+                                            "```tool",
+                                            "```tool_",
+                                            "```tool_c",
+                                            "```tool_ca",
+                                            "```tool_cal",
+                                        }
+                                        or stripped_probe.startswith("```j")
+                                        or stripped_probe.startswith("```js")
+                                        or stripped_probe.startswith("```jso")
+                                    )
+
+                                    if (
+                                        not looks_like_tool_prefix
+                                        and not incomplete_tool_prefix
+                                    ):
+                                        content_chunk = ChatCompletionChunkResponse(
+                                            id=completion_id,
+                                            created=created_time,
+                                            model=request.model,
+                                            choices=[
+                                                ChatCompletionChunkChoice(
+                                                    index=0,
+                                                    delta={
+                                                        "content": pending_content
+                                                    },
+                                                    finish_reason=None,
+                                                )
+                                            ],
+                                        )
+                                        yield f"data: {json.dumps(content_chunk.model_dump(), ensure_ascii=False)}\n\n"
+                                        content_was_streamed = True
+                                        pending_content = ""
+                        except Exception as e:
+                            print(f"[STREAM ERROR] {e}")
+                            break
+
+                    # 解析 tool_calls 和 thinking（在流结束后处理）
+                    tool_calls_parsed, final_content, gemini_thinking = (
+                        parse_tool_calls(full_content, allowed_tool_names)
+                    )
+                    if not gemini_thinking:
+                        gemini_thinking = (
+                            getattr(client, "last_stream_thinking", "") or ""
+                        )
+
+                    if tool_calls_parsed:
+                        final_content = None
+                        for tool_call in tool_calls_parsed:
+                            tool_chunk = ChatCompletionChunkResponse(
+                                id=completion_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[
+                                    ChatCompletionChunkChoice(
+                                        index=0,
+                                        delta={
+                                            "tool_calls": [
                                                 {
-                                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                                    "index": tool_call.get("index", 0),
+                                                    "id": tool_call.get("id"),
                                                     "type": "function",
                                                     "function": {
-                                                        "name": "opencode",
-                                                        "arguments": json.dumps(
-                                                            args, ensure_ascii=False
-                                                        ),
+                                                        "name": tool_call[
+                                                            "function"
+                                                        ].get("name"),
+                                                        "arguments": tool_call[
+                                                            "function"
+                                                        ].get("arguments"),
                                                     },
                                                 }
-                                            )
-                                    except:
-                                        pass
-                                    break
-            except:
-                pass
-            if tool_calls:
-                final_content = None
+                                            ]
+                                        },
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                            yield f"data: {json.dumps(tool_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
-        # 流式响应
-        if request.stream:
-
-            async def generate_stream():
-                chunk_data = ChatCompletionChunkResponse(
-                    id=completion_id,
-                    created=created_time,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0, delta={"role": "assistant"}, finish_reason=None
+                    # 图片生成：流结束后补发处理好的本地媒体 markdown
+                    if should_force_postprocessed_stream:
+                        generated_media_urls = (
+                            getattr(client, "last_stream_generated_media", []) or []
                         )
-                    ],
-                )
-                yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
+                        if generated_media_urls:
+                            local_media_urls = []
+                            for media_url in generated_media_urls:
+                                local_media_url = client._download_media_as_data_url(
+                                    media_url
+                                )
+                                local_media_urls.append(local_media_url or media_url)
 
-                # send thinking content as reasoning_content delta
-                if gemini_thinking:
-                    think_chunk = ChatCompletionChunkResponse(
+                            media_markdown = "\n\n".join(
+                                f"![生成的内容 {i + 1}]({url})"
+                                for i, url in enumerate(local_media_urls)
+                            )
+                            if media_markdown:
+                                full_content = (
+                                    (
+                                        full_content.strip() + "\n\n" + media_markdown
+                                    ).strip()
+                                    if full_content.strip()
+                                    else media_markdown
+                                )
+                                final_content = full_content
+                                media_chunk = ChatCompletionChunkResponse(
+                                    id=completion_id,
+                                    created=created_time,
+                                    model=request.model,
+                                    choices=[
+                                        ChatCompletionChunkChoice(
+                                            index=0,
+                                            delta={
+                                                "content": "\n\n" + media_markdown
+                                                if full_content.strip()
+                                                != media_markdown
+                                                else media_markdown
+                                            },
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                )
+                                yield f"data: {json.dumps(media_chunk.model_dump(), ensure_ascii=False)}\n\n"
+                                content_was_streamed = True
+
+                    # tools 开启时，正文在流中被先缓冲；如果最终没有解析出 tool_calls，
+                    # 这里智能补发：若已经部分流式输出，则补发缓冲区内剩余的尾部正文；若从未流式输出，则补发全部完整正文。
+                    if (
+                        not tool_calls_parsed
+                        and final_content
+                    ):
+                        text_to_send = pending_content if content_was_streamed else final_content
+                        if text_to_send:
+                            content_chunk = ChatCompletionChunkResponse(
+                                id=completion_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[
+                                    ChatCompletionChunkChoice(
+                                        index=0,
+                                        delta={"content": text_to_send},
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                            yield f"data: {json.dumps(content_chunk.model_dump(), ensure_ascii=False)}\n\n"
+
+                    # 保存助手回复到消息历史
+                    if full_content and not tool_calls_parsed:
+                        from client import Message as _Msg
+
+                        client.messages.append(
+                            _Msg(role="assistant", content=full_content)
+                        )
+
+                    # 如果有 thinking，补发 reasoning_content chunk。
+                    # 对真流式路径，thinking 已在 chat_stream() 增量输出过，不再重复补发。
+                    if (
+                        gemini_thinking
+                        and full_content
+                        and should_force_postprocessed_stream
+                    ):
+                        reasoning_chunk = ChatCompletionChunkResponse(
+                            id=completion_id,
+                            created=created_time,
+                            model=request.model,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta={"reasoning_content": gemini_thinking},
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                        yield f"data: {json.dumps(reasoning_chunk.model_dump(), ensure_ascii=False)}\n\n"
+
+                    # 结束 chunk
+                    finish_chunk = ChatCompletionChunkResponse(
                         id=completion_id,
                         created=created_time,
                         model=request.model,
                         choices=[
                             ChatCompletionChunkChoice(
                                 index=0,
-                                delta={"reasoning_content": gemini_thinking},
-                                finish_reason=None,
+                                delta={},
+                                finish_reason="tool_calls"
+                                if tool_calls_parsed
+                                else "stop",
                             )
                         ],
                     )
-                    yield f"data: {json.dumps(think_chunk.model_dump(), ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(finish_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
-                if tool_calls:
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        chunk_data = ChatCompletionChunkResponse(
-                            id=completion_id,
-                            created=created_time,
-                            model=request.model,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    index=0,
-                                    delta={
-                                        "tool_calls": [
-                                            {
-                                                "index": 0,
-                                                "id": tc.get("id"),
-                                                "type": tc.get("type", "function"),
-                                                "function": {
-                                                    "name": fn.get("name"),
-                                                    "arguments": fn.get(
-                                                        "arguments", ""
-                                                    ),
-                                                },
-                                            }
-                                        ]
-                                    },
-                                    finish_reason=None,
-                                )
-                            ],
+                    
+                    from client import estimate_tokens
+                    if response is not None:
+                        prompt_tokens = response.usage.prompt_tokens
+                        completion_tokens = response.usage.completion_tokens
+                    else:
+                        prompt_tokens = estimate_tokens(text)
+                        completion_tokens = estimate_tokens(full_content)
+                    
+                    usage_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": request.model,
+                        "choices": [],  # 必须为空数组
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens
+                        }
+                    }
+                    yield f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n"
+                    
+                    yield "data: [DONE]\n\n"
+                    _stats["total_requests"] += 1
+                    _stats["total_prompt_tokens"] += prompt_tokens
+                    _stats["total_completion_tokens"] += completion_tokens
+                    _stats["total_tokens"] += prompt_tokens + completion_tokens
+                    _stats["requests_by_model"][request.model] = (
+                        _stats["requests_by_model"].get(request.model, 0) + 1
+                    )
+                    try:
+                        db.record_usage(
+                            user_id,
+                            key_id,
+                            request.model,
+                            prompt_tokens,
+                            completion_tokens,
                         )
-                        yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                else:
-                    # 模拟流式：逐字输出
-                    for i in range(0, len(final_content), 3):
-                        chunk_text = final_content[i : i + 3]
-                        chunk_data = ChatCompletionChunkResponse(
-                            id=completion_id,
-                            created=created_time,
-                            model=request.model,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    index=0,
-                                    delta={"content": chunk_text},
-                                    finish_reason=None,
-                                )
-                            ],
-                        )
-                        yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.02)
+                    except Exception:
+                        pass
 
-                chunk_data = ChatCompletionChunkResponse(
-                    id=completion_id,
-                    created=created_time,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta={},
-                            finish_reason="tool_calls" if tool_calls else "stop",
-                        )
-                    ],
+                    log_api_call(
+                        request_log,
+                        {
+                            "streamed": True,
+                            "model": request.model,
+                            "content": full_content,
+                            "final_content": final_content,
+                            "thinking": gemini_thinking,
+                            "tool_calls": tool_calls_parsed,
+                            "usage": {
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": prompt_tokens + completion_tokens,
+                            },
+                        },
+                    )
+
+                return StreamingResponse(
+                    generate_real_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
                 )
-                yield f"data: {json.dumps(chunk_data.model_dump(), ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
 
+            # ====== 非流式：走原来的完整响应路径 ======
+            # 统一走非流式拿到完整响应，解析 tool_calls，再以 SSE 推流
+            response = client.chat(messages=messages, model=upstream_model)
+            reply_content = response.choices[0].message.content
+
+            # [FIX] 如果是图片模型，将其返回转换为 Markdown 图片语法，以兼容前端展示
+            if is_image_model and reply_content:
+                raw = reply_content.strip()
+                try:
+                    parsed = json.loads(raw)
+                    if (
+                        isinstance(parsed, dict)
+                        and "data" in parsed
+                        and len(parsed["data"]) > 0
+                    ):
+                        url = parsed["data"][0].get("url")
+                        if url:
+                            reply_content = f"![Generated Image]({url})"
+                except Exception:
+                    if raw.startswith("http://") or raw.startswith("https://"):
+                        if not raw.startswith("!["):
+                            reply_content = f"![Generated Image]({raw})"
+
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+            created_time = int(time.time())
+
+            # 解析工具调用和思考过程（无论是否有 tools 都提取 thinking）
+            tool_calls, final_content, gemini_thinking = parse_tool_calls(
+                reply_content, allowed_tool_names
+            )
+
+            if tool_calls:
+                final_content = None
+
+            # ====== 非流式响应构建 ======
             if tool_calls:
                 response_message = ChatCompletionResponseMessage(
                     content=final_content if final_content else None,
                     tool_calls=tool_calls,
                 )
+                finish_reason = "tool_calls"
             else:
                 response_message = ChatCompletionResponseMessage(content=final_content)
+                finish_reason = "stop"
 
             response_data = ChatCompletionResponse(
                 id=completion_id,
@@ -2116,9 +2924,7 @@ async def chat_completions(
                 model=request.model,
                 choices=[
                     ChatCompletionChoice(
-                        index=0,
-                        message=response_message,
-                        finish_reason="tool_calls" if tool_calls else "stop",
+                        index=0, message=response_message, finish_reason=finish_reason
                     )
                 ],
                 usage=Usage(
@@ -2127,8 +2933,10 @@ async def chat_completions(
                     total_tokens=response.usage.total_tokens,
                 ),
             )
+
             log_api_call(request_log, response_data.model_dump())
 
+            # 更新内存统计
             _stats["total_requests"] += 1
             _stats["total_prompt_tokens"] += response.usage.prompt_tokens
             _stats["total_completion_tokens"] += response.usage.completion_tokens
@@ -2137,6 +2945,7 @@ async def chat_completions(
                 _stats["requests_by_model"].get(request.model, 0) + 1
             )
 
+            # 更新数据库统计
             try:
                 db.record_usage(
                     user_id,
@@ -2148,72 +2957,14 @@ async def chat_completions(
             except Exception:
                 pass
 
-            return StreamingResponse(
-                generate_stream(),
-                media_type="text/event-stream",
+            return JSONResponse(
+                content=response_data.model_dump(),
                 headers={
                     "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
+                    "X-Request-Id": completion_id,
                 },
             )
-
-        # 构建响应消息
-        if tool_calls:
-            response_message = ChatCompletionResponseMessage(
-                content=final_content if final_content else None, tool_calls=tool_calls
-            )
-            finish_reason = "tool_calls"
-        else:
-            response_message = ChatCompletionResponseMessage(content=final_content)
-            finish_reason = "stop"
-
-        response_data = ChatCompletionResponse(
-            id=completion_id,
-            created=created_time,
-            model=request.model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0, message=response_message, finish_reason=finish_reason
-                )
-            ],
-            usage=Usage(
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens,
-            ),
-        )
-
-        log_api_call(request_log, response_data.model_dump())
-
-        # 更新内存统计
-        _stats["total_requests"] += 1
-        _stats["total_prompt_tokens"] += response.usage.prompt_tokens
-        _stats["total_completion_tokens"] += response.usage.completion_tokens
-        _stats["total_tokens"] += response.usage.total_tokens
-        _stats["requests_by_model"][request.model] = (
-            _stats["requests_by_model"].get(request.model, 0) + 1
-        )
-
-        # 更新数据库统计
-        try:
-            db.record_usage(
-                user_id,
-                key_id,
-                request.model,
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-            )
-        except Exception:
-            pass
-
-        return JSONResponse(
-            content=response_data.model_dump(),
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Request-Id": completion_id,
-            },
-        )
+        # end async with entry.lock
     except HTTPException:
         raise
     except Exception as e:
@@ -2238,55 +2989,70 @@ async def chat_completions(
         )
 
         if is_token_error:
-            print(f"[WARN] 检测到 token 可能过期(key_id={key_id})，尝试自动刷新...")
+            print(
+                f"[WARN] 检测到 token 可能过期(user={ckey.user_id}, key={ckey.key_id})，尝试自动刷新..."
+            )
             refresh_result = try_refresh_tokens(force=True)
 
             if refresh_result["success"]:
-                # 重置当前用户的 client 并自动重试一次
-                reset_client(key_id=key_id)
+                # 重置当前会话的 client 并自动重试一次
+                reset_client(ckey=ckey)
                 try:
-                    client = get_client(key_id=key_id)
-                    messages = []
-                    for m in request.messages:
-                        content = m.content
-                        message_payload = {"role": m.role, "content": content}
-                        if m.name:
-                            message_payload["name"] = m.name
-                        if m.tool_call_id:
-                            message_payload["tool_call_id"] = m.tool_call_id
-                        if m.tool_calls:
-                            message_payload["tool_calls"] = m.tool_calls
+                    retry_entry = get_client(ckey)
+                    async with retry_entry.lock:
+                        retry_client = retry_entry.client
+                        messages = []
+                        for m in request.messages:
+                            content = m.content
+                            message_payload = {"role": m.role, "content": content}
+                            if m.name:
+                                message_payload["name"] = m.name
+                            if m.tool_call_id:
+                                message_payload["tool_call_id"] = m.tool_call_id
+                            if m.tool_calls:
+                                message_payload["tool_calls"] = m.tool_calls
+                            if (
+                                m.role == "tool"
+                                and m.name
+                                and "tool_call_id" not in message_payload
+                            ):
+                                message_payload["tool_call_id"] = m.name
+                            messages.append(message_payload)
                         if (
-                            m.role == "tool"
-                            and m.name
-                            and "tool_call_id" not in message_payload
+                            request.function_call is not None
+                            and not request.tool_choice
                         ):
-                            message_payload["tool_call_id"] = m.name
-                        messages.append(message_payload)
-                    if request.function_call is not None and not request.tool_choice:
-                        request.tool_choice = request.function_call
-                    if request.tools:
-                        tools_prompt = build_tools_prompt(
-                            [t.model_dump() for t in request.tools]
+                            request.tool_choice = request.function_call
+                        if request.tools:
+                            tools_prompt = build_tools_prompt(
+                                [t.model_dump() for t in request.tools]
+                            )
+                            if tools_prompt:
+                                for i in range(len(messages) - 1, -1, -1):
+                                    if messages[i].get("role") == "user":
+                                        user_content = messages[i].get("content", "")
+                                        if isinstance(user_content, str):
+                                            messages[i]["content"] = (
+                                                user_content + "\n\n" + tools_prompt
+                                            )
+                                        elif isinstance(user_content, list):
+                                            user_content.append(
+                                                {"type": "text", "text": tools_prompt}
+                                            )
+                                        break
+
+                        response = retry_client.chat(
+                            messages=messages, model=upstream_model
                         )
-                        if tools_prompt:
-                            messages = [
-                                {"role": "system", "content": tools_prompt}
-                            ] + messages
-                    response = client.chat(messages=messages, model=request.model)
-                    reply_content = response.choices[0].message.content
-                    completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-                    created_time = int(time.time())
-                    tool_calls, final_content, gemini_thinking = parse_tool_calls(
-                        reply_content
-                    )
-                    if not request.tools:
-                        tool_calls = []
-                    # 重试成功，跳过下面的错误处理，直接走正常流式返回
-                    # (重试逻辑的流式输出部分与正常路径相同，直接 raise 让用户重试更安全)
-                    error_msg = (
-                        f"Token 已自动刷新并重置上下文，请重试请求。原错误: {error_msg}"
-                    )
+                        reply_content = response.choices[0].message.content
+                        completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                        created_time = int(time.time())
+                        tool_calls, final_content, gemini_thinking = parse_tool_calls(
+                            reply_content
+                        )
+                        # 重试成功，跳过下面的错误处理，直接走正常流式返回
+                        # (重试逻辑的流式输出部分与正常路径相同，直接 raise 让用户重试更安全)
+                        error_msg = f"Token 已自动刷新并重置上下文，请重试请求。原错误: {error_msg}"
                 except Exception as retry_e:
                     error_msg = f"Token 刷新后重试仍失败: {str(retry_e)[:200]}"
             else:
@@ -2302,14 +3068,29 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@app.post("/v1/chat/completions/reset")
-async def reset_context(authorization: str = Header(None)):
+@app.post("/v1/client/reset")
+async def reset_context(
+    authorization: str = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+):
     auth_result = verify_api_key(authorization, db)
-    key_id = auth_result.get("key_id", 0)
-    with _client_lock:
-        if key_id in _clients:
-            _clients[key_id].reset()
-    return {"status": "ok", "message": f"会话上下文已重置 (key_id={key_id})"}
+    # 如果提供了 session_id → 只重置该会话；否则重置该用户该 key 的所有会话
+    effective_sid = x_session_id
+    if effective_sid:
+        ckey = resolve_client_key(auth_result, effective_sid)
+        reset_client(ckey=ckey)
+        return {
+            "status": "ok",
+            "message": f"会话上下文已重置 (session={ckey.session_id[:16]}...)",
+        }
+    else:
+        user_id = auth_result.get("user_id", 0)
+        key_id = auth_result.get("key_id", 0)
+        reset_client(user_id=user_id, key_id=key_id)
+        return {
+            "status": "ok",
+            "message": f"所有会话上下文已重置 (user={user_id}, key={key_id})",
+        }
 
 
 # 注意: load_config() 已在 startup_event 中调用，这里保留是为了兼容直接导入模块的情况

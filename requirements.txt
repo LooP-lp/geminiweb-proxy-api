@@ -1,5 +1,8 @@
-httpx>=0.25.0
-fastapi>=0.104.0
-uvicorn>=0.24.0
-openai>=1.0.0
-tiktoken>=0.7.0
+httpx
+fastapi
+uvicorn
+openai
+tiktoken
+dotenv
+psycopg2
+bcrypt
