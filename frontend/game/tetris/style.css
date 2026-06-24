@@ -1,0 +1,517 @@
+/* ===== Base / Retro Theme (default) ===== */
+:root, body[data-theme="retro"] {
+  --bg: #191724;
+  --panel-bg: rgba(255, 255, 255, 0.05);
+  --border: #444;
+  --canvas-glow: rgba(0, 213, 255, 0.2);
+  --stat-label: #908caa;
+  --stat-value: #ebbcba;
+  --score-color: #0DFF72;
+  --hint-color: #908caa;
+  --btn-bg: #FF0D72;
+  --btn-hover: #ff3b8e;
+  --btn-text: #fff;
+  --overlay-bg: rgba(0, 0, 0, 0.85);
+  --rank-gold: #FFD700;
+  --rank-silver: #C0C0C0;
+  --rank-bronze: #CD7F32;
+  --select-bg: #2a2837;
+  --select-border: #555;
+  --accent: #0DC2FF;
+}
+
+/* ===== Neon Theme ===== */
+body[data-theme="neon"] {
+  --bg: #0a0a1a;
+  --panel-bg: rgba(0, 255, 255, 0.05);
+  --border: #00FFFF;
+  --canvas-glow: rgba(0, 255, 255, 0.4);
+  --stat-label: #00cccc;
+  --stat-value: #00FFFF;
+  --score-color: #39FF14;
+  --hint-color: #009999;
+  --btn-bg: #FF0055;
+  --btn-hover: #ff3377;
+  --btn-text: #fff;
+  --overlay-bg: rgba(0, 10, 10, 0.9);
+  --rank-gold: #FFFF00;
+  --rank-silver: #00FFFF;
+  --rank-bronze: #FF6600;
+  --select-bg: #0d0d2a;
+  --select-border: #00FFFF;
+  --accent: #39FF14;
+}
+
+/* ===== Modern Theme (Hard - Red) ===== */
+body[data-theme="modern"] {
+  --bg: #1a0a0a;
+  --panel-bg: rgba(255, 20, 20, 0.06);
+  --border: #FF2D2D;
+  --canvas-glow: rgba(255, 45, 45, 0.4);
+  --stat-label: #aa5555;
+  --stat-value: #ff8888;
+  --score-color: #FF2D2D;
+  --hint-color: #884444;
+  --btn-bg: #FF2D2D;
+  --btn-hover: #ff4444;
+  --btn-text: #fff;
+  --overlay-bg: rgba(20, 0, 0, 0.9);
+  --rank-gold: #FFD700;
+  --rank-silver: #ff8888;
+  --rank-bronze: #FF6B4A;
+  --select-bg: #2a0d0d;
+  --select-border: #FF2D2D;
+  --accent: #FF2D2D;
+}
+
+body {
+  background-color: var(--bg);
+  color: #fff;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  margin: 0;
+  overflow: hidden;
+  transition: background-color 0.4s;
+}
+
+.game-container {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 20px;
+  background: var(--panel-bg);
+  padding: 20px;
+  border-radius: 15px;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+  transition: background 0.4s, box-shadow 0.4s;
+}
+
+/* ===== Canvas Wrapper + Start Screen ===== */
+.canvas-wrapper {
+  position: relative;
+  line-height: 0;
+}
+
+#tetris {
+  border: 3px solid var(--border);
+  border-radius: 5px;
+  background-color: #000;
+  box-shadow: 0 0 20px var(--canvas-glow);
+  transition: border-color 0.4s, box-shadow 0.4s;
+  display: block;
+}
+
+.start-screen {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  z-index: 5;
+  border-radius: 5px;
+  transition: opacity 0.3s;
+}
+
+.start-screen.hidden {
+  display: none !important;
+}
+
+.pixel-title {
+  font-family: monospace;
+  font-size: 2.4rem;
+  font-weight: bold;
+  letter-spacing: 6px;
+  color: var(--accent);
+  text-shadow:
+    3px 3px 0 #000,
+    -1px -1px 0 #000,
+    1px -1px 0 #000,
+    -1px 1px 0 #000,
+    0 0 20px var(--accent);
+}
+
+.pixel-btn {
+  font-family: monospace;
+  font-size: 1.4rem;
+  font-weight: bold;
+  letter-spacing: 4px;
+  padding: 12px 40px;
+  color: #fff;
+  background: var(--btn-bg);
+  border: 4px solid #fff;
+  box-shadow:
+    4px 4px 0 #000,
+    inset -2px -2px 0 rgba(0,0,0,0.3),
+    inset 2px 2px 0 rgba(255,255,255,0.2);
+  cursor: pointer;
+  position: relative;
+  transition: transform 0.08s, box-shadow 0.08s;
+  image-rendering: pixelated;
+}
+
+.pixel-btn:hover {
+  transform: translate(-1px, -1px);
+  box-shadow:
+    5px 5px 0 #000,
+    inset -2px -2px 0 rgba(0,0,0,0.3),
+    inset 2px 2px 0 rgba(255,255,255,0.2);
+}
+
+.pixel-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow:
+    2px 2px 0 #000,
+    inset -2px -2px 0 rgba(0,0,0,0.3),
+    inset 2px 2px 0 rgba(255,255,255,0.2);
+}
+
+/* ===== Side Panel ===== */
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  min-width: 150px;
+}
+
+.stat-box {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  text-align: center;
+  transition: border-color 0.4s;
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  color: var(--stat-label);
+  margin-bottom: 6px;
+  transition: color 0.4s;
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: var(--stat-value);
+  transition: color 0.4s;
+}
+
+#score {
+  font-size: 2rem;
+  font-weight: bold;
+  color: var(--score-color);
+  transition: color 0.4s;
+}
+
+#next-piece {
+  border: 2px solid var(--border);
+  background-color: #000;
+  display: block;
+  margin: 0 auto;
+  transition: border-color 0.4s;
+}
+
+.mode-select {
+  width: 100%;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--select-border);
+  background: var(--select-bg);
+  color: #fff;
+  font-size: 0.9rem;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.4s, background 0.4s;
+}
+
+.mode-select:focus {
+  border-color: var(--score-color);
+}
+
+/* ===== History Sections (Collapsible) ===== */
+.history-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-section {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.4s;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.85rem;
+  font-weight: bold;
+  color: var(--stat-value);
+  transition: color 0.4s, background 0.2s;
+}
+
+.history-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.history-header-title {
+  flex: 1;
+}
+
+.history-header-arrow {
+  font-size: 0.7rem;
+  color: var(--stat-label);
+  transition: transform 0.2s;
+}
+
+.history-body {
+  max-height: 160px;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+  padding: 0 8px 8px;
+}
+
+.history-body.collapsed {
+  max-height: 0;
+  padding: 0 8px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-empty {
+  color: var(--stat-label);
+  font-size: 0.8rem;
+  padding: 4px 0;
+  text-align: center;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.82rem;
+}
+
+.rank-icon {
+  font-size: 1rem;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.rank-1 { color: var(--rank-gold); }
+.rank-2 { color: var(--rank-silver); }
+.rank-3 { color: var(--rank-bronze); }
+
+.rank-other {
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: var(--stat-label);
+}
+
+.history-score {
+  font-weight: bold;
+  color: var(--stat-value);
+  flex: 1;
+}
+
+.history-time {
+  color: var(--stat-label);
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
+
+.history-section-title {
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: var(--accent);
+  padding: 6px 6px 3px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.history-item.is-me {
+  background: rgba(0, 255, 255, 0.1);
+  border-left: 2px solid var(--accent);
+}
+
+.controls-hint {
+  margin-top: auto;
+  font-size: 0.8rem;
+  color: var(--hint-color);
+  line-height: 1.6;
+  text-align: left;
+  transition: color 0.4s;
+}
+
+.controls-hint b {
+  color: #ddd;
+}
+
+/* ===== Mute Button ===== */
+.mute-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border);
+  color: #fff;
+  font-size: 1.3rem;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  transition: background 0.2s, border-color 0.2s, transform 0.1s;
+  z-index: 20;
+}
+
+.mute-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.1);
+}
+
+.mute-btn.muted {
+  opacity: 0.5;
+  border-color: #666;
+}
+
+/* ===== Overlay ===== */
+#overlay {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: var(--overlay-bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  border-radius: 15px;
+  transition: background 0.4s;
+}
+
+#overlay.hidden {
+  display: none !important;
+}
+
+.game-over {
+  text-align: center;
+}
+
+.game-over h1 {
+  color: #fff;
+  font-size: 2rem;
+  margin-bottom: 20px;
+  text-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+}
+
+button {
+  padding: 10px 25px;
+  font-size: 1.1rem;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform 0.1s, background 0.3s;
+}
+
+button:hover {
+  transform: scale(1.05);
+  background: var(--btn-hover);
+}
+
+/* ===== Scrollbar ===== */
+.history-list::-webkit-scrollbar {
+  width: 4px;
+}
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+/* ===== Upload Retry Dialog ===== */
+#upload-retry-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #1a1a2e;
+  border: 2px solid #ff4d4d;
+  border-radius: 12px;
+  padding: 20px;
+  z-index: 10000;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+  text-align: center;
+  min-width: 260px;
+  font-family: inherit;
+}
+
+.retry-title {
+  color: #ff9999;
+  margin-bottom: 16px;
+  font-size: 1.2rem;
+}
+
+.retry-info {
+  color: #ddd;
+  margin-bottom: 20px;
+  font-size: 0.9rem;
+}
+
+.retry-actions {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+}
+
+.retry-btn {
+  background: #ff4d4d !important;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+.retry-cancel-btn {
+  background: #555 !important;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+}

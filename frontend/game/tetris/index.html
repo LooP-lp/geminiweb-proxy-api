@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tetris</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="game-container">
+    <button id="mute-btn" class="mute-btn">🔊</button>
+
+    <div class="canvas-wrapper">
+      <canvas id="tetris" width="240" height="400"></canvas>
+      <div id="start-screen" class="start-screen">
+        <div class="pixel-title">TETRIS</div>
+        <button id="start-btn" class="pixel-btn">START</button>
+      </div>
+    </div>
+
+    <div class="side-panel">
+      <div class="stat-box">
+        <div class="stat-label">Mode</div>
+        <select id="mode-select" class="mode-select">
+          <option value="retro">Retro - 简单</option>
+          <option value="neon">Neon - 中等</option>
+          <option value="modern">Modern - 困难</option>
+        </select>
+      </div>
+
+      <div class="stat-box">
+        <div class="stat-label">Next</div>
+        <canvas id="next-piece" width="80" height="80"></canvas>
+      </div>
+
+      <div class="stat-box">
+        <div class="stat-label">Score</div>
+        <div id="score" class="stat-value">0</div>
+      </div>
+
+      <div class="history-sections">
+        <div class="history-section" data-mode="retro">
+          <div class="history-header" onclick="toggleHistoryPanel('retro')">
+            <span class="history-header-title">简单 Retro</span>
+            <span class="history-header-arrow" id="arrow-retro">▼</span>
+          </div>
+          <div class="history-body" id="history-retro">
+            <div class="history-list" id="list-retro"></div>
+          </div>
+        </div>
+        <div class="history-section" data-mode="neon">
+          <div class="history-header" onclick="toggleHistoryPanel('neon')">
+            <span class="history-header-title">中等 Neon</span>
+            <span class="history-header-arrow" id="arrow-neon">▼</span>
+          </div>
+          <div class="history-body collapsed" id="history-neon">
+            <div class="history-list" id="list-neon"></div>
+          </div>
+        </div>
+        <div class="history-section" data-mode="modern">
+          <div class="history-header" onclick="toggleHistoryPanel('modern')">
+            <span class="history-header-title">困难 Modern</span>
+            <span class="history-header-arrow" id="arrow-modern">▼</span>
+          </div>
+          <div class="history-body collapsed" id="history-modern">
+            <div class="history-list" id="list-modern"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls-hint">
+        <b>Arrows</b>: Move & Drop<br>
+        <b>Space</b>: Hard Drop<br>
+        <b>Q/W</b>: Rotate<br>
+        <b>Esc</b>: Pause<br>
+        <b>R</b>: Reset
+      </div>
+    </div>
+
+    <div id="overlay" class="hidden">
+      <div class="game-over">
+        <h1>GAME OVER</h1>
+        <button onclick="backToStart()">OK</button>
+      </div>
+    </div>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>

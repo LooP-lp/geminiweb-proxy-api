@@ -667,3 +667,4 @@ class DBManager:
         except Exception as e:
             print(f"获取活跃prompt失败: {e}")
             return None
+

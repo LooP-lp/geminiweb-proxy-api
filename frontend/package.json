@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build && xcopy /E /I /Y game \"..\\dist\\game\\\" >nul",
+    "build": "node --max-old-space-size=4096 ./node_modules/vue-tsc/bin/vue-tsc.js --noEmit -p tsconfig.app.json && vite build && xcopy /E /I /Y game \"..\\dist\\game\\\" >nul",
     "preview": "vite preview"
   },
   "dependencies": {

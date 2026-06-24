@@ -1336,39 +1336,50 @@ class GeminiClient:
                 for msg in messages:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    
-                if role == "user":
-                    t, imgs = self._parse_content(content)
-                    if t:
-                        text_parts.append(t)
-                    if imgs:
-                        images.extend(imgs)
-                elif role == "assistant":
-                    if isinstance(content, str) and content:
-                        text_parts.append(content)
-                    elif isinstance(content, list) and content:
-                        content_text, _ = self._parse_content(content)
-                        if content_text:
-                            text_parts.append(content_text)
-                elif role == "system":
-                    if isinstance(content, str) and content:
-                        text_parts.insert(0, content)
-                elif role == "tool":
-                    tool_call_id = msg.get("tool_call_id", "")
-                    tool_name = msg.get("name", "")
-                    content_text = str(content) if content is not None else ""
-                    if content_text:
-                        if tool_call_id or tool_name:
-                            label = "Tool result"
-                            if tool_name:
-                                label += f" ({tool_name})"
-                            if tool_call_id:
-                                label += f" [{tool_call_id}]"
-                            text_parts.append(f"{label}:\n{content_text}")
-                        else:
-                            text_parts.append(content_text)
 
-                self.messages.append(Message(role=role, content=content))
+                    if role == "user":
+                        t, imgs = self._parse_content(content)
+                        if t:
+                            text_parts.append(t)
+                        if imgs:
+                            images.extend(imgs)
+                    elif role == "assistant":
+                        tool_calls = msg.get("tool_calls") or []
+                        if tool_calls:
+                            for tc in tool_calls:
+                                fn = (tc or {}).get("function", {})
+                                tc_id = (tc or {}).get("id", "")
+                                name = fn.get("name", "")
+                                args = fn.get("arguments", "")
+                                header = "Assistant requested tool call"
+                                if tc_id:
+                                    header += f" [{tc_id}]"
+                                text_parts.append(f"{header}: {name}({args})")
+                        if isinstance(content, str) and content:
+                            text_parts.append(content)
+                        elif isinstance(content, list) and content:
+                            content_text, _ = self._parse_content(content)
+                            if content_text:
+                                text_parts.append(content_text)
+                    elif role == "system":
+                        if isinstance(content, str) and content:
+                            text_parts.insert(0, content)
+                    elif role == "tool":
+                        tool_call_id = msg.get("tool_call_id", "")
+                        tool_name = msg.get("name", "")
+                        content_text = str(content) if content is not None else ""
+                        if content_text:
+                            if tool_call_id or tool_name:
+                                label = "Tool result"
+                                if tool_name:
+                                    label += f" ({tool_name})"
+                                if tool_call_id:
+                                    label += f" [{tool_call_id}]"
+                                text_parts.append(f"{label}:\n{content_text}")
+                            else:
+                                text_parts.append(content_text)
+
+                    self.messages.append(Message(role=role, content=content))
             
             text = "\n\n".join(text_parts)
 
@@ -1523,7 +1534,9 @@ class GeminiClient:
         
         for attempt in range(max_retries):
             try:
-                resp = self.session.post(url, params=params, data=form_data, headers=model_headers, timeout=60.0)
+                # 每次重试创建新连接，避免连接池污染
+                with httpx.Client(timeout=240.0, follow_redirects=True, headers=self.session.headers, cookies=self.session.cookies) as _s:
+                    resp = _s.post(url, params=params, data=form_data, headers=model_headers)
             
                 if self.debug:
                     print(f"[DEBUG] 响应状态: {resp.status_code}")
@@ -1599,8 +1612,6 @@ class GeminiClient:
         """流式发送请求，返回增量生成器。支持 messages 参数（兼容 OpenAI tools）"""
         url = f"{self.BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 
-        params = {"bl": self.bl, "f.sid": "", "hl": "zh-CN", "_reqid": str(self.request_count * 100000 + random.randint(10000, 99999)), "rt": "c"}
-
         model_id = self.model_ids.get("flash", "56fdd199312815e2")
         if model:
             model_lower = model.lower()
@@ -1608,16 +1619,15 @@ class GeminiClient:
                 model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
             elif "lite" in model_lower:
                 model_id = self.model_ids.get("lite", "8c46e95b1a07cecc")
-        
+
         image_paths = []
         if images:
             for img in images:
                 img_data = base64.b64decode(img["data"])
                 image_paths.append(self._upload_image(img_data, img["mime_type"]))
-        
+
         # 优先使用 messages，否则 fallback 到 text
         if messages:
-            # 提取最后一条用户消息
             last_user_msg = None
             for m in reversed(messages):
                 if m.get("role") == "user":
@@ -1632,71 +1642,101 @@ class GeminiClient:
                             break
                 else:
                     text = str(content)
-        
+
         req_data = self._build_request_data(text, images, image_paths, model)
         form_data = {"f.req": req_data, "at": self.snlm0e}
-        model_headers = { "x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4, 5, 6, 8], None, None, 2, None, None, 1, 2, str(uuid.uuid4()).upper()], separators=(',', ':')) }
-        
+        model_headers = {"x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4, 5, 6, 8], None, None, 2, None, None, 1, 2, str(uuid.uuid4()).upper()], separators=(',', ':'))}
+
         final_text = ""
         final_thinking = ""
         generated_media_set = set()
         debug_stream_snapshot_printed = False
         self.last_stream_thinking = ""
         self.last_stream_generated_media = []
-        
-        with self.session.stream("POST", url, params=params, data=form_data, headers=model_headers, timeout=60.0) as resp:
-            resp.raise_for_status()
-            self.request_count += 1
-            
-            for line in resp.iter_lines():
-                if not line or line.startswith(")]}'") or line.isdigit():
-                    continue
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                params = {"bl": self.bl, "f.sid": "", "hl": "zh-CN", "_reqid": str(self.request_count * 100000 + random.randint(10000, 99999)), "rt": "c"}
+
+                # 每次重试创建新 session，避免连接池污染
+                stream_session = httpx.Client(
+                    timeout=240.0,
+                    follow_redirects=True,
+                    headers=self.session.headers,
+                    cookies=self.session.cookies,
+                )
+
                 try:
-                    data = json.loads(line)
-                    if isinstance(data, list) and data[0] and len(data[0]) >= 3 and data[0][0] == "wrb.fr" and data[0][2]:
-                        inner = json.loads(data[0][2])
-                        imgs = self._extract_generated_images(inner)
-                        if imgs:
-                            for img in imgs:
-                                generated_media_set.add(img)
-                            self.last_stream_generated_media = list(generated_media_set)
-                        extracted_answer, extracted_thought = self._extract_stream_text_and_thought(inner)
+                    with stream_session.stream("POST", url, params=params, data=form_data, headers=model_headers) as resp:
+                        resp.raise_for_status()
+                        self.request_count += 1
 
-                        has_candidate = bool(inner and len(inner) > 4 and inner[4])
-                        if self.debug and not debug_stream_snapshot_printed and (has_candidate or extracted_answer or extracted_thought):
+                        for line in resp.iter_lines():
+                            if not line or line.startswith(")]}'") or line.isdigit():
+                                continue
                             try:
-                                cand_preview = None
-                                candidate_slots = None
-                                if inner and len(inner) > 4 and inner[4]:
-                                    cand_preview = inner[4][0]
-                                    if isinstance(cand_preview, list):
-                                        candidate_slots = {
-                                            str(i): str(cand_preview[i])[:500]
-                                            for i in range(min(len(cand_preview), 6))
-                                        }
-                                print(f"[DEBUG] Gemini stream thinking snapshot: {json.dumps({'inner_len': len(inner) if isinstance(inner, list) else None, 'has_candidate': has_candidate, 'inner_preview': str(inner)[:2500], 'candidate_preview': str(cand_preview)[:2500], 'candidate_slots': candidate_slots, 'extracted_answer_preview': extracted_answer[:800], 'extracted_thought_preview': extracted_thought[:800]}, ensure_ascii=False)[:5000]}")
-                            except Exception as debug_e:
-                                print(f"[DEBUG] Gemini stream thinking snapshot failed: {debug_e}")
-                            debug_stream_snapshot_printed = True
+                                data = json.loads(line)
+                                if isinstance(data, list) and data[0] and len(data[0]) >= 3 and data[0][0] == "wrb.fr" and data[0][2]:
+                                    inner = json.loads(data[0][2])
+                                    imgs = self._extract_generated_images(inner)
+                                    if imgs:
+                                        for img in imgs:
+                                            generated_media_set.add(img)
+                                        self.last_stream_generated_media = list(generated_media_set)
+                                    extracted_answer, extracted_thought = self._extract_stream_text_and_thought(inner)
 
-                        content = extracted_answer
-                        if extracted_thought and len(extracted_thought) > len(final_thinking):
-                            new_thinking = extracted_thought[len(final_thinking):]
-                            final_thinking = extracted_thought
-                            self.last_stream_thinking = final_thinking
-                            if new_thinking:
-                                yield {"type": "reasoning", "text": new_thinking}
+                                    has_candidate = bool(inner and len(inner) > 4 and inner[4])
+                                    if self.debug and not debug_stream_snapshot_printed and (has_candidate or extracted_answer or extracted_thought):
+                                        try:
+                                            cand_preview = None
+                                            candidate_slots = None
+                                            if inner and len(inner) > 4 and inner[4]:
+                                                cand_preview = inner[4][0]
+                                                if isinstance(cand_preview, list):
+                                                    candidate_slots = {
+                                                        str(i): str(cand_preview[i])[:500]
+                                                        for i in range(min(len(cand_preview), 6))
+                                                    }
+                                            print(f"[DEBUG] Gemini stream thinking snapshot: {json.dumps({'inner_len': len(inner) if isinstance(inner, list) else None, 'has_candidate': has_candidate, 'inner_preview': str(inner)[:2500], 'candidate_preview': str(cand_preview)[:2500], 'candidate_slots': candidate_slots, 'extracted_answer_preview': extracted_answer[:800], 'extracted_thought_preview': extracted_thought[:800]}, ensure_ascii=False)[:5000]}")
+                                        except Exception as debug_e:
+                                            print(f"[DEBUG] Gemini stream thinking snapshot failed: {debug_e}")
+                                        debug_stream_snapshot_printed = True
 
-                        if content and len(content) > len(final_text):
-                            new_text = content[len(final_text):]
-                            final_text = content
-                            if inner[1]:
-                                self.conversation_id = inner[1][0] or self.conversation_id
-                                if len(inner[1]) > 1:
-                                    self.response_id = inner[1][1] or self.response_id
-                            yield {"type": "content", "text": new_text}
-                except:
-                    continue
+                                    content = extracted_answer
+                                    if extracted_thought and len(extracted_thought) > len(final_thinking):
+                                        new_thinking = extracted_thought[len(final_thinking):]
+                                        final_thinking = extracted_thought
+                                        self.last_stream_thinking = final_thinking
+                                        if new_thinking:
+                                            yield {"type": "reasoning", "text": new_thinking}
+
+                                    if content and len(content) > len(final_text):
+                                        new_text = content[len(final_text):]
+                                        final_text = content
+                                        if inner[1]:
+                                            self.conversation_id = inner[1][0] or self.conversation_id
+                                            if len(inner[1]) > 1:
+                                                self.response_id = inner[1][1] or self.response_id
+                                        yield {"type": "content", "text": new_text}
+                            except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+                                continue
+                finally:
+                    stream_session.close()
+
+                # 流正常结束，跳出重试循环
+                break
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout) as e:
+                if final_text:
+                    print(f"[STREAM ERROR] 流中途断开（已有内容，不重试）: {e}", flush=True)
+                    break
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    print(f"[STREAM ERROR] {e}，{wait_time}秒后重试 ({attempt + 1}/{max_retries})...", flush=True)
+                    time.sleep(wait_time)
+                else:
+                    print(f"[STREAM ERROR] 已重试{max_retries}次，放弃: {e}", flush=True)
+                    raise
 
 
 # OpenAI 兼容接口
