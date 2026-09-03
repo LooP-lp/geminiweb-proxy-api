@@ -621,8 +621,8 @@ class GeminiClient:
         
         # 模型映射: 将模型名称转换为 Gemini 内部模型标识
         # [[0]] = gemini-3.1-pro (Pro 版)
-        # [[1]] = gemini-3.5-flash (快速版，默认)
-        # [[3]] = gemini-3.1-lite (Lite 版)
+        # [[1]] = gemini-3.8-flash (快速版，默认)
+        # [[3]] = gemini-3.5-flash-lite (Lite 版)
         model_code = [[1]]  # 默认快速版
         if model:
             model_lower = model.lower()
@@ -1272,7 +1272,7 @@ class GeminiClient:
             image: 图片二进制数据
             image_url: 图片 URL
             reset_context: 是否重置上下文
-            model: 模型名称 (gemini-3.5-flash/gemini-3.1-lite/gemini-3.1-pro)
+            model: 模型名称 (gemini-3.8-flash/gemini-3.5-flash-lite/gemini-3.1-pro)
         
         Returns:
             ChatCompletionResponse: OpenAI 格式响应

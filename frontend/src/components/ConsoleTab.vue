@@ -171,7 +171,7 @@ struct Usage { prompt_tokens: u32, completion_tokens: u32, total_tokens: u32, }
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let client = reqwest::Client::new();
   let request = ChatRequest {
-    model: "gemini-3.5-flash".to_string(),
+    model: "gemini-3.8-flash".to_string(),
     messages: vec![Message { role: "user".to_string(), content: "你好".to_string() }],
     stream: false,
   };

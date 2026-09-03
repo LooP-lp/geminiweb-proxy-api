@@ -10,9 +10,9 @@
 
 **[English](#english) | [简体中文](#简体中文)**
 
-*A high-performance reverse-engineered gateway that turns Gemini Web (Advanced supported!) into an OpenAI-Compatible API. Zero-cost access to Gemini 3.5 Flash (with Expanded Thinking logs and the "Banana" image modality), Imagen 3, and smart session continuity.*
+*A high-performance reverse-engineered gateway that turns Gemini Web (Advanced supported!) into an OpenAI-Compatible API. Zero-cost access to Gemini 3.8 Flash (with Expanded Thinking logs and the "Banana" image modality), Imagen 3, and smart session continuity.*
 
-*一个高性能的反向工程网关，将 Gemini 网页版（支持 Advanced 账户！）转换为标准的 OpenAI 兼容 API。零成本开启最新 Gemini 3.5 Flash（支持拓展思考与 Banana 图片模态）、Imagen 3 图像生成、深度思考过程（Thinking Process）以及智能会话续接。*
+*一个高性能的反向工程网关，将 Gemini 网页版（支持 Advanced 账户！）转换为标准的 OpenAI 兼容 API。零成本开启最新 Gemini 3.8 Flash（支持拓展思考与 Banana 图片模态）、Imagen 3 图像生成、深度思考过程（Thinking Process）以及智能会话续接。*
 
 </div>
 
@@ -24,7 +24,7 @@
   - [1. Gemini Image Generation & Resolution Optimization / Gemini 绘图与分辨率优化](#1-gemini-image-generation--resolution-optimization--gemini-绘图与分辨率优化)
   - [2. Intelligent Session Management / 智能会话管理](#2-intelligent-session-management--智能会话管理)
   - [3. Multi-modal Third-Party Proxy Gateway / 多模态中转与第三方代理](#3-multi-modal-third-party-proxy-gateway--多模态中转与第三方代理)
-  - [4. Gemini 3.5 Flash & Banana Image Modality / 3.5 Flash 拓展思考与 Banana 模态](#4-gemini-35-flash--banana-image-modality--35-flash-拓展思考与-banana-模态)
+  - [4. Gemini 3.8 Flash & Banana Image Modality / 3.8 Flash 拓展思考与 Banana 模态](#4-gemini-38-flash--banana-image-modality--38-flash-拓展思考与-banana-模态)
 - [🛠️ Tech Stack & Database / 技术栈与数据库](#%EF%B8%8F-tech-stack--database--技术栈与数据库)
 - [🚀 Quick Start / 快速开始](#-quick-start--快速开始)
 - [📝 Developer's Rants & Insights / 开发者吐槽与碎碎念](#-developers-rants--insights--开发者吐槽与碎碎念)
@@ -110,10 +110,10 @@ Apart from wrapping Gemini Web, the adapter supports a configurable **routing pr
 
 ---
 
-### 4. Gemini 3.5 Flash & Banana Image Modality Support
+### 4. Gemini 3.8 Flash & Banana Image Modality Support
 This adapter is updated to support the latest web-side API updates from Google:
-- **Expanded Thinking Reasoning Logs**: Fully extracts the internal chain-of-thought/reasoning logs returned by Gemini 3.5 Flash. It translates this thinking trace into standard OpenAI compatible thinking block structures, allowing you to monitor the AI's logical progression in real-time.
-- **"Banana" Multimodal Processing**: Seamlessly handles image and video files uploaded via the new visual backend (code-named "Banana") in Gemini 3.5 Flash. It optimizes boundary headers and payload structures during streaming to guarantee high-speed, multi-modal context understanding without dropping connection frames.
+- **Expanded Thinking Reasoning Logs**: Fully extracts the internal chain-of-thought/reasoning logs returned by Gemini 3.8 Flash. It translates this thinking trace into standard OpenAI compatible thinking block structures, allowing you to monitor the AI's logical progression in real-time.
+- **"Banana" Multimodal Processing**: Seamlessly handles image and video files uploaded via the new visual backend (code-named "Banana") in Gemini 3.8 Flash. It optimizes boundary headers and payload structures during streaming to guarantee high-speed, multi-modal context understanding without dropping connection frames.
 
 ---
 
@@ -146,10 +146,10 @@ OpenAI 客户端是 **无状态** 的（每次请求都会把历史消息从头�
 
 ---
 
-### 4. Gemini 3.5 Flash 拓展思考与 Banana 图片模态支持
+### 4. Gemini 3.8 Flash 拓展思考与 Banana 图片模态支持
 针对 Google 网页端 API 的最新升级，本适配器已完美跟进：
-- **拓展思考推理日志 (Expanded Thinking)**：全面支持抓取和解析最新 Gemini 3.5 Flash 返回的内部思维推理链，能够完美提取 thought trace 并以标准 OpenAI 格式的推理块形式输出，让您可以直观地观测 AI 思考的逻辑演变过程。
-- **"Banana" 多模态图片解析**：无缝适配 Gemini 3.5 Flash 网页版最新采用的高性能视觉处理框架（内部代号 "Banana"）。通过重构上传流中的 Boundary 头部信息和多维分块格式，确保上传图片/视频进行多模态分析时响应速度更快，彻底告别丢帧和长文本卡死。
+- **拓展思考推理日志 (Expanded Thinking)**：全面支持抓取和解析最新 Gemini 3.8 Flash 返回的内部思维推理链，能够完美提取 thought trace 并以标准 OpenAI 格式的推理块形式输出，让您可以直观地观测 AI 思考的逻辑演变过程。
+- **"Banana" 多模态图片解析**：无缝适配 Gemini 3.8 Flash 网页版最新采用的高性能视觉处理框架（内部代号 "Banana"）。通过重构上传流中的 Boundary 头部信息和多维分块格式，确保上传图片/视频进行多模态分析时响应速度更快，彻底告别丢帧和长文本卡死。
 
 ---
 

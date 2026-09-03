@@ -265,7 +265,7 @@ function loadHistory() {
 
 // Models
 const allModels = ref<string[]>([])
-const selectedModel = ref('gemini/gemini-3.5-flash')
+const selectedModel = ref('gemini/gemini-3.8-flash')
 const dropdownOpen = ref(false)
 const dropdownEl = ref<HTMLElement | null>(null)
 
@@ -578,7 +578,7 @@ autoFollowStream.value = true
 scrollToBottom(true)
 
   try {
-    const model = selectedModel.value || 'gemini-3.5-flash'
+    const model = selectedModel.value || 'gemini-3.8-flash'
     const sessionId = auth.getChatSessionId()
     abortController.value = new AbortController()
     const resp = await chatCompletionsAPI(auth.getApiKey(), { model, messages: messagesToSend, stream: true }, sessionId, abortController.value.signal)

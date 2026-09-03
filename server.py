@@ -368,7 +368,7 @@ def verify_admin_session(request: Request):
 
 
 # 默认可用模型列表 (Gemini 3 官网三个模型: 快速/思考/Pro)
-DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-3.1-lite", "gemini-3.1-pro"]
+DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro"]
 
 # 默认模型 ID (用于请求头选择模型)
 DEFAULT_MODEL_IDS = {
